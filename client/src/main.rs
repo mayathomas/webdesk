@@ -9,7 +9,6 @@ use input::InputController;
 use screen::ScreenCaptureService;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::time::interval;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 use std::sync::Arc;

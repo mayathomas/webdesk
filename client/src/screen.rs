@@ -76,6 +76,7 @@ impl ScreenCaptureService {
     }
     
     /// 获取主显示器尺寸
+    #[allow(unused)]
     pub fn get_primary_display_size() -> Result<(u32, u32)> {
         let display = Display::primary()?;
         let capturer = Capturer::new(display)?;
