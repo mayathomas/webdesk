@@ -222,6 +222,10 @@
         let ctx = null;
         let isConnected = false;
 
+        // 用于存储完整的桌面图像和差分更新
+        let desktopCanvas = null;
+        let desktopCtx = null;
+
         function showStatus(message, type = 'success') {
             const status = document.getElementById('status');
             status.textContent = message;
@@ -336,21 +340,77 @@
             console.log('收到屏幕数据:', {
                 width: screenData.width,
                 height: screenData.height,
-                dataLength: screenData.image_data ? screenData.image_data.length : 0
+                format: screenData.format,
+                fullFrame: screenData.full_frame,
+                dataLength: screenData.image_data ? screenData.image_data.length : 0,
+                changedRegions: screenData.changed_regions ? screenData.changed_regions.length : 0
             });
             
-            const img = new Image();
-            img.onload = function() {
-                console.log('图像加载成功:', img.width, 'x', img.height);
-                canvas.width = screenData.width;
-                canvas.height = screenData.height;
-                ctx.drawImage(img, 0, 0);
-                console.log('图像已绘制到画布');
-            };
-            img.onerror = function() {
-                console.error('图像加载失败');
-            };
-            img.src = 'data:image/png;base64,' + screenData.image_data;
+            // 初始化桌面画布（如果需要）
+            if (!desktopCanvas) {
+                desktopCanvas = document.createElement('canvas');
+                desktopCtx = desktopCanvas.getContext('2d');
+            }
+            
+            if (screenData.full_frame && screenData.image_data) {
+                // 处理完整帧
+                const img = new Image();
+                img.onload = function() {
+                    console.log('完整帧加载成功:', img.width, 'x', img.height, '格式:', screenData.format);
+                    
+                    // 更新画布尺寸
+                    canvas.width = screenData.width;
+                    canvas.height = screenData.height;
+                    desktopCanvas.width = screenData.width;
+                    desktopCanvas.height = screenData.height;
+                    
+                    // 绘制到桌面画布
+                    desktopCtx.drawImage(img, 0, 0);
+                    
+                    // 复制到显示画布
+                    ctx.drawImage(desktopCanvas, 0, 0);
+                    
+                    console.log('完整帧已绘制到画布');
+                };
+                img.onerror = function() {
+                    console.error('完整帧图像加载失败');
+                };
+                
+                // 根据格式设置正确的数据URL
+                const mimeType = screenData.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+                img.src = `data:${mimeType};base64,${screenData.image_data}`;
+                
+            } else if (screenData.changed_regions && screenData.changed_regions.length > 0) {
+                // 处理差分更新
+                console.log(`处理差分更新: ${screenData.changed_regions.length} 个区域`);
+                
+                let loadedRegions = 0;
+                const totalRegions = screenData.changed_regions.length;
+                
+                screenData.changed_regions.forEach(region => {
+                    const img = new Image();
+                    img.onload = function() {
+                        // 绘制到桌面画布的指定位置
+                        desktopCtx.drawImage(img, region.x, region.y);
+                        
+                        loadedRegions++;
+                        if (loadedRegions === totalRegions) {
+                            // 所有区域加载完成，更新显示画布
+                            ctx.drawImage(desktopCanvas, 0, 0);
+                            console.log(`差分更新完成: ${totalRegions} 个区域`);
+                        }
+                    };
+                    img.onerror = function() {
+                        console.error('差分区域图像加载失败:', region);
+                    };
+                    
+                    // 差分区域通常是JPEG格式
+                    img.src = `data:image/jpeg;base64,${region.data}`;
+                });
+            } else {
+                // 没有变化的帧，无需更新
+                console.log('没有屏幕变化，跳过更新');
+            }
         }
 
         function handleMouseClick(event) {

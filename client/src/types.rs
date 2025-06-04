@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::screen::ChangedRegion;
 
 /// 客户端注册请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,17 +16,10 @@ pub struct RegisterResponse {
     pub message: String,
 }
 
-/// 浏览器连接请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserConnectRequest {
-    pub client_id: String,
-    pub auth_code: String,
-}
-
-/// 屏幕截图数据
+/// 屏幕数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenData {
-    pub image_data: String, // base64编码的图片数据
+    pub image_data: String,
     pub width: u32,
     pub height: u32,
     pub format: String, // "png", "jpeg", "diff"
@@ -33,23 +27,13 @@ pub struct ScreenData {
     pub changed_regions: Option<Vec<ChangedRegion>>, // 变化区域
 }
 
-/// 变化区域
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChangedRegion {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: String, // base64编码的区域数据
-}
-
 /// 鼠标事件
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseEvent {
     pub x: f64,
     pub y: f64,
-    pub button: String, // "left", "right", "middle"
-    pub event_type: String, // "click", "move", "scroll"
+    pub button: String,
+    pub event_type: String,
     pub scroll_delta: Option<i32>,
 }
 
@@ -57,39 +41,37 @@ pub struct MouseEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardEvent {
     pub key: String,
-    pub event_type: String, // "press", "release"
+    pub event_type: String,
 }
 
 /// WebSocket消息类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebSocketMessage {
-    // 客户端消息
     Register(RegisterRequest),
     ScreenData(ScreenData),
-    Ping,
-    
-    // 浏览器消息
-    BrowserConnect(BrowserConnectRequest),
     MouseEvent(MouseEvent),
     KeyboardEvent(KeyboardEvent),
-    Disconnect,
-    
-    // 服务端响应
     RegisterResponse(RegisterResponse),
-    Connected { success: bool, message: String },
     BrowserConnected { message: String },
     BrowserDisconnected { message: String },
     Error { message: String },
+    Ping,
     Pong,
 }
 
 /// 客户端状态
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum ClientState {
+    WaitingForRegistration,
+    WaitingForBrowser,
+    BrowserConnected,
+    Idle,
+}
+
+/// 线程控制信号
 #[derive(Debug, Clone)]
-pub struct ClientState {
-    pub client_id: String,
-    pub mac_address: String,
-    pub auth_code: String,
-    pub is_connected: bool,
-    pub browser_connected: bool,
+pub enum ThreadControlSignal {
+    Start,
+    Stop,
 } 
