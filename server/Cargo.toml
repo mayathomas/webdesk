@@ -1,0 +1,17 @@
+[package]
+name = "remote-control-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+anyhow = { workspace = true }
+mac_address = { workspace = true }
+warp = { workspace = true }
+tokio-stream = "0.1"
+dashmap = "5.5" 
