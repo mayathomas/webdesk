@@ -7,11 +7,22 @@ use config::ClientConfig;
 use futures_util::{SinkExt, StreamExt};
 use input::InputController;
 use screen::ScreenCaptureService;
+use screen::ChangedRegion;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, State};
+
+// 应用状态管理
+#[derive(Debug)]
+struct AppState {
+    client_config: Arc<Mutex<ClientConfig>>,
+    service_running: Arc<Mutex<bool>>,
+    client_state: Arc<Mutex<ClientState>>,
+    service_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
 
 // 重用服务端的消息类型定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +43,9 @@ pub struct ScreenData {
     pub image_data: String,
     pub width: u32,
     pub height: u32,
+    pub format: String, // "png", "jpeg", "diff"
+    pub full_frame: bool, // 是否为完整帧
+    pub changed_regions: Option<Vec<ChangedRegion>>, // 变化区域
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,11 +78,12 @@ pub enum WebSocketMessage {
     Pong,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 enum ClientState {
     WaitingForRegistration,
     WaitingForBrowser,
     BrowserConnected,
+    Idle,
 }
 
 // RustDesk架构：线程控制信号
@@ -78,18 +93,122 @@ enum ThreadControlSignal {
     Stop,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("💻 启动远程控制客户端 (RustDesk架构)...");
+// Tauri命令：获取客户端信息
+#[tauri::command]
+async fn get_client_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let config = state.client_config.lock().map_err(|e| e.to_string())?;
+    
+    let mac_address = config.get_mac_address().map_err(|e| e.to_string())?;
+    
+    // 如果没有客户端ID，尝试生成一个基于MAC地址的ID
+    let client_id = if let Some(id) = &config.client_id {
+        id.clone()
+    } else {
+        // 临时显示基于MAC地址的ID，直到服务器分配正式ID
+        format!("temp-{}", &mac_address.replace(":", "")[0..8])
+    };
+    
+    Ok(serde_json::json!({
+        "clientId": client_id,
+        "authCode": config.auth_code.clone(),
+        "macAddress": mac_address,
+        "version": "1.0.0"
+    }))
+}
+
+// Tauri命令：获取服务状态
+#[tauri::command]
+async fn get_service_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let config = state.client_config.lock().map_err(|e| e.to_string())?;
+    let client_state = state.client_state.lock().map_err(|e| e.to_string())?;
+    let service_running = state.service_running.lock().map_err(|e| e.to_string())?;
+    
+    Ok(serde_json::json!({
+        "client_id": config.client_id.clone(),
+        "state": format!("{:?}", *client_state),
+        "running": *service_running
+    }))
+}
+
+// Tauri命令：启动远程控制服务
+#[tauri::command]
+async fn start_remote_service(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut service_running = state.service_running.lock().map_err(|e| e.to_string())?;
+    
+    if *service_running {
+        return Err("服务已在运行中".to_string());
+    }
+    
+    // 启动服务
+    let app_state = AppState {
+        client_config: state.client_config.clone(),
+        service_running: state.service_running.clone(),
+        client_state: state.client_state.clone(),
+        service_handle: state.service_handle.clone(),
+    };
+    let service_app = app.clone();
+    
+    let handle = tokio::spawn(async move {
+        if let Err(e) = run_remote_service(app_state, service_app).await {
+            eprintln!("远程控制服务错误: {}", e);
+        }
+    });
+    
+    *state.service_handle.lock().map_err(|e| e.to_string())? = Some(handle);
+    *service_running = true;
+    
+    Ok(())
+}
+
+// Tauri命令：停止远程控制服务
+#[tauri::command]
+async fn stop_remote_service(state: State<'_, AppState>) -> Result<(), String> {
+    let mut service_running = state.service_running.lock().map_err(|e| e.to_string())?;
+    let mut service_handle = state.service_handle.lock().map_err(|e| e.to_string())?;
+    
+    if let Some(handle) = service_handle.take() {
+        handle.abort();
+    }
+    
+    *service_running = false;
+    *state.client_state.lock().map_err(|e| e.to_string())? = ClientState::Idle;
+    
+    Ok(())
+}
+
+// 运行远程控制服务（保持原有逻辑，添加GUI事件支持）
+async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
+    println!("💻 启动远程控制客户端 (Tauri 2.0 + RustDesk架构)...");
+    
+    // 发送启动中状态
+    let _ = app.emit("status-update", serde_json::json!({
+        "state": "正在连接服务器...",
+        "running": true
+    }));
     
     // 加载配置
-    let mut config = ClientConfig::load()?;
+    let mut config = {
+        let config_lock = state.client_config.lock().unwrap();
+        config_lock.clone()
+    };
     
-    // 运行时获取MAC地址
-    let mac_address = config.get_mac_address()?;
+    // 运行时获取MAC地址  
+    let mac_address = match config.get_mac_address() {
+        Ok(mac) => mac,
+        Err(e) => {
+            let _ = app.emit("status-update", serde_json::json!({
+                "state": "获取MAC地址失败",
+                "running": false
+            }));
+            return Err(e);
+        }
+    };
     
     println!("⚙️ 客户端配置:");
-    println!("   📡 服务器地址: {}", config.server_url);
+    println!("   📡 服务器地址11111: {}", config.server_url);
     println!("   🏠 MAC地址: {}", mac_address);
     println!("   🔑 验证码: {}", config.auth_code);
     if let Some(client_id) = &config.client_id {
@@ -97,11 +216,38 @@ async fn main() -> Result<()> {
     }
     
     // 连接到服务器
-    let url = Url::parse(&config.server_url)?;
+    let url = match Url::parse(&config.server_url) {
+        Ok(url) => url,
+        Err(e) => {
+            let _ = app.emit("status-update", serde_json::json!({
+                "state": "服务器URL格式错误",
+                "running": false
+            }));
+            return Err(e.into());
+        }
+    };
+    
     println!("🔌 正在连接到服务器: {}", url);
     
-    let (ws_stream, _) = connect_async(url).await?;
+    let (ws_stream, _) = match connect_async(url).await {
+        Ok(result) => result,
+        Err(e) => {
+            println!("❌ 连接服务器失败: {}", e);
+            let _ = app.emit("status-update", serde_json::json!({
+                "state": "连接服务器失败",
+                "running": false
+            }));
+            return Err(e.into());
+        }
+    };
+    
     println!("✅ WebSocket连接已建立");
+    
+    // 立即发送连接成功状态到前端
+    let _ = app.emit("status-update", serde_json::json!({
+        "state": "WaitingForRegistration",
+        "running": true
+    }));
     
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     
@@ -112,7 +258,14 @@ async fn main() -> Result<()> {
     });
     
     let register_msg = serde_json::to_string(&register_request)?;
+    println!("📤 发送注册请求: {}", register_msg);
     ws_sender.send(Message::Text(register_msg)).await?;
+    
+    // 发送注册中状态到前端
+    let _ = app.emit("status-update", serde_json::json!({
+        "state": "WaitingForRegistration",
+        "running": true
+    }));
     
     // 初始化组件
     let input_controller = Arc::new(InputController::new());
@@ -137,13 +290,27 @@ async fn main() -> Result<()> {
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        println!("📥 收到服务器消息: {}", text);
                         if let Ok(ws_msg) = serde_json::from_str::<WebSocketMessage>(&text) {
+                            println!("📦 解析消息类型: {:?}", std::mem::discriminant(&ws_msg));
                             match ws_msg {
                                 WebSocketMessage::RegisterResponse(response) => {
                                     if response.success {
                                         println!("🎉 注册成功，客户端ID: {}", response.client_id);
-                                        config.update_client_id(response.client_id)?;
+                                        config.update_client_id(response.client_id.clone())?;
+                                        
+                                        // 更新状态
+                                        {
+                                            let mut config_lock = state.client_config.lock().unwrap();
+                                            *config_lock = config.clone();
+                                        }
+                                        
                                         client_state = ClientState::WaitingForBrowser;
+                                        
+                                        // 发送状态更新到前端
+                                        let _ = app.emit("client-info-update", serde_json::json!({
+                                            "clientId": response.client_id
+                                        }));
                                     } else {
                                         println!("❌ 注册失败: {}", response.message);
                                     }
@@ -246,6 +413,8 @@ async fn main() -> Result<()> {
                                 
                                 _ => {}
                             }
+                        } else {
+                            println!("❌ 无法解析服务器消息: {}", text);
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
@@ -262,6 +431,18 @@ async fn main() -> Result<()> {
                     }
                     _ => {}
                 }
+                
+                // 更新状态到应用状态管理器
+                {
+                    let mut state_lock = state.client_state.lock().unwrap();
+                    *state_lock = client_state.clone();
+                }
+                
+                // 发送状态更新到前端
+                let _ = app.emit("status-update", serde_json::json!({
+                    "state": format!("{:?}", client_state),
+                    "client_id": config.client_id.clone()
+                }));
             }
             
             // 接收来自屏幕捕获线程的数据并转发
@@ -279,11 +460,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        }
-        
-        // 状态显示
-        if client_state != ClientState::BrowserConnected {
-            display_status(&client_state).await;
         }
     }
     
@@ -303,7 +479,7 @@ async fn main() -> Result<()> {
         handle.abort();
     }
     
-    println!("👋 客户端已退出");
+    println!("👋 远程控制服务已退出");
     Ok(())
 }
 
@@ -312,9 +488,10 @@ fn screen_capture_thread(
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ThreadControlSignal>,
     screen_tx: tokio::sync::mpsc::UnboundedSender<WebSocketMessage>,
 ) -> Result<()> {
-    println!("📷 屏幕捕获线程已启动 (RustDesk架构)");
+    println!("📷 屏幕捕获线程已启动 (RustDesk架构 + JPEG压缩 + 差分编码)");
     
     let mut capturer = ScreenCaptureService::create_capturer()?;
+    let mut screen_service = ScreenCaptureService::new();
     let mut active = false;
     let mut last_capture = std::time::Instant::now();
     let capture_interval = Duration::from_millis(100); // 10 FPS
@@ -324,7 +501,7 @@ fn screen_capture_thread(
         if let Ok(signal) = control_rx.try_recv() {
             match signal {
                 ThreadControlSignal::Start => {
-                    println!("📷 屏幕捕获开始");
+                    println!("📷 屏幕捕获开始 (优化模式)");
                     active = true;
                 }
                 ThreadControlSignal::Stop => {
@@ -336,17 +513,31 @@ fn screen_capture_thread(
         
         // 如果激活且达到捕获间隔
         if active && last_capture.elapsed() >= capture_interval {
-            match ScreenCaptureService::capture_screen(&mut capturer) {
-                Ok((image_data, width, height)) => {
+            match screen_service.capture_screen_optimized(&mut capturer) {
+                Ok((image_data, width, height, format, full_frame, changed_regions)) => {
+                    // 保存用于日志的值
+                    let log_format = format.clone();
+                    let log_regions_count = changed_regions.as_ref().map(|r| r.len()).unwrap_or(0);
+                    
                     let screen_data = WebSocketMessage::ScreenData(ScreenData {
                         image_data,
                         width,
                         height,
+                        format,
+                        full_frame,
+                        changed_regions,
                     });
                     
                     if screen_tx.send(screen_data).is_err() {
                         println!("❌ 发送屏幕数据到主线程失败，主线程可能已断开");
                         break;
+                    }
+                    
+                    // 只在有数据时打印日志（避免无变化时的日志垃圾）
+                    if full_frame {
+                        println!("📷 发送完整帧: {}x{} ({})", width, height, log_format);
+                    } else if log_regions_count > 0 {
+                        println!("📷 发送差分数据: {} 个变化区域", log_regions_count);
                     }
                     
                     last_capture = std::time::Instant::now();
@@ -454,18 +645,39 @@ fn handle_keyboard_event(keyboard_event: KeyboardEvent, input_controller: &Input
     }
 }
 
-async fn display_status(state: &ClientState) {
-    match state {
-        ClientState::WaitingForRegistration => {
-            println!("⏳ 等待注册完成...");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        ClientState::WaitingForBrowser => {
-            println!("⏳ 等待浏览器连接...");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-        ClientState::BrowserConnected => {
-            // 连接状态下不需要额外延时
-        }
+fn main() -> Result<()> {
+    // 初始化配置
+    let client_config = ClientConfig::load()?;
+    println!("{:?}", client_config);
+    
+    // 确保MAC地址能获取到
+    if let Ok(mac) = client_config.get_mac_address() {
+        println!("🏠 MAC地址: {}", mac);
     }
+    
+    // 确保验证码已生成
+    println!("🔑 验证码: {}", client_config.auth_code);
+    
+    // 创建应用状态
+    let app_state = AppState {
+        client_config: Arc::new(Mutex::new(client_config)),
+        service_running: Arc::new(Mutex::new(false)),
+        client_state: Arc::new(Mutex::new(ClientState::Idle)),
+        service_handle: Arc::new(Mutex::new(None)),
+    };
+    
+    // 启动Tauri 2.0应用
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![
+            get_client_info,
+            get_service_status,
+            start_remote_service,
+            stop_remote_service
+        ])
+        .run(tauri::generate_context!())
+        .expect("启动Tauri应用失败");
+    
+    Ok(())
 }

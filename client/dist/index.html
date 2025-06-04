@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>远程控制客户端</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖥️ 远程控制客户端</h1>
+            <div class="version">版本 1.0.0</div>
+            <div class="status-indicator-header">
+                <div id="statusDot" class="status-dot offline"></div>
+                <span id="statusText" class="status-text">离线</span>
+            </div>
+        </div>
+        
+        <div class="content">
+            <div class="info-section">
+                <h2>📋 客户端信息</h2>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <label>客户端ID:</label>
+                        <span id="clientId" class="value">未分配</span>
+                    </div>
+                    <div class="info-item">
+                        <label>验证码:</label>
+                        <span id="authCode" class="value">加载中...</span>
+                    </div>
+                    <div class="info-item">
+                        <label>MAC地址:</label>
+                        <span id="macAddress" class="value">加载中...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="status-section">
+                <h2>📡 连接详情</h2>
+                <div id="statusDetails" class="status-details">
+                    正在自动启动远程控制服务...
+                </div>
+            </div>
+            
+            <div class="log-section">
+                <h2>📜 运行日志</h2>
+                <div id="logContainer" class="log-container">
+                    <div class="log-item info">💻 远程控制客户端已启动</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html> 
