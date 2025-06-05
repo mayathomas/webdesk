@@ -16,6 +16,38 @@ pub struct RegisterResponse {
     pub message: String,
 }
 
+/// 浏览器连接请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserConnectRequest {
+    pub client_id: String,
+    pub auth_code: String,
+}
+
+/// WebRTC SDP 会话描述
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDescription {
+    pub sdp_type: String, // "offer", "answer"
+    pub sdp: String,
+}
+
+/// WebRTC ICE 候选
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IceCandidate {
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_mline_index: Option<u16>,
+}
+
+/// 数据分片头信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkHeader {
+    pub message_id: String,      // 唯一消息ID
+    pub chunk_index: usize,      // 当前分片索引
+    pub total_chunks: usize,     // 总分片数量
+    pub chunk_size: usize,       // 当前分片大小
+    pub total_size: usize,       // 总数据大小
+}
+
 /// 屏幕数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenData {
@@ -44,20 +76,44 @@ pub struct KeyboardEvent {
     pub event_type: String,
 }
 
-/// WebSocket消息类型
+/// WebSocket消息类型（保持兼容，作为信令服务器）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebSocketMessage {
+    // 客户端注册和基础消息
     Register(RegisterRequest),
+    RegisterResponse(RegisterResponse),
+    
+    // 浏览器连接消息
+    BrowserConnect(BrowserConnectRequest),
+    Connected { success: bool, message: String },
+    BrowserConnected { message: String },
+    BrowserDisconnected { message: String },
+    
+    // WebRTC 信令消息
+    WebRTCOffer { 
+        target_id: String, // 目标客户端ID
+        session_description: SessionDescription 
+    },
+    WebRTCAnswer { 
+        target_id: String, // 目标浏览器ID
+        session_description: SessionDescription 
+    },
+    WebRTCIceCandidate { 
+        target_id: String, // 目标ID
+        ice_candidate: IceCandidate 
+    },
+    
+    // 传统WebSocket消息（向后兼容）
     ScreenData(ScreenData),
     MouseEvent(MouseEvent),
     KeyboardEvent(KeyboardEvent),
-    RegisterResponse(RegisterResponse),
-    BrowserConnected { message: String },
-    BrowserDisconnected { message: String },
-    Error { message: String },
+    
+    // 控制消息
+    Disconnect,
     Ping,
     Pong,
+    Error { message: String },
 }
 
 /// 客户端状态
@@ -66,6 +122,8 @@ pub enum ClientState {
     WaitingForRegistration,
     WaitingForBrowser,
     BrowserConnected,
+    WebRTCConnecting, // 新增：WebRTC连接中
+    WebRTCConnected,  // 新增：WebRTC已连接
     Idle,
 }
 

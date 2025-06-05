@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>远程桌面控制</title>
+    <title>远程桌面控制 - WebRTC版本</title>
     <style>
         * {
             margin: 0;
@@ -127,6 +127,12 @@
             border: 1px solid #f5c6cb;
         }
 
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
         .remote-desktop {
             display: none;
             text-align: center;
@@ -165,6 +171,15 @@
             margin-top: 1rem;
         }
 
+        .connection-info {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 1rem;
@@ -185,8 +200,8 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🖥️ 远程桌面控制</h1>
-            <p>输入客户端ID和验证码来远程控制桌面</p>
+            <h1>🌐 远程桌面控制 (WebRTC)</h1>
+            <p>使用WebRTC P2P技术进行低延迟远程控制</p>
         </div>
 
         <div id="loginSection">
@@ -199,16 +214,23 @@
                     <label for="authCode">验证码:</label>
                     <input type="password" id="authCode" placeholder="请输入验证码" />
                 </div>
-                <button class="btn btn-primary" onclick="connect()">连接</button>
+                <button class="btn btn-primary" onclick="connect()">开始WebRTC连接</button>
             </div>
         </div>
 
         <div id="status" class="status" style="display: none;"></div>
 
+        <div id="connectionInfo" class="connection-info" style="display: none;">
+            <div>🔗 连接状态: <span id="connectionState">未连接</span></div>
+            <div>📡 信令状态: <span id="signalingState">未连接</span></div>
+            <div>🧊 ICE状态: <span id="iceState">未连接</span></div>
+            <div>📊 数据通道: <span id="dataChannelState">未连接</span></div>
+        </div>
+
         <div id="remoteDesktop" class="remote-desktop">
             <div class="desktop-container">
                 <canvas id="desktopCanvas" class="desktop-screen"></canvas>
-                <div id="loading" class="loading">正在连接远程桌面...</div>
+                <div id="loading" class="loading">正在建立WebRTC连接...</div>
             </div>
             <div class="controls">
                 <button class="btn btn-danger" onclick="disconnect()">断开连接</button>
@@ -217,12 +239,19 @@
     </div>
 
     <script>
-        let ws = null;
+        // WebRTC相关变量
+        let peerConnection = null;
+        let dataChannel = null;
+        let signalingSocket = null;
+        let currentClientId = null; // 添加全局变量保存当前客户端ID
+        
+        // 分片重组相关变量
+        let chunkBuffers = new Map(); // 存储分片数据的Map: messageId -> {chunks: [], totalChunks: number, totalSize: number}
+        
+        // 画布相关变量
         let canvas = null;
         let ctx = null;
         let isConnected = false;
-
-        // 用于存储完整的桌面图像和差分更新
         let desktopCanvas = null;
         let desktopCtx = null;
         
@@ -235,12 +264,14 @@
         let lastRenderTime = 0;
         const FRAME_TIME = 16.67; // 60fps = 16.67ms per frame
         
-        // 消息队列管理 - 解决消息堆积问题
-        let messageQueue = [];
-        let isProcessingQueue = false;
-        let droppedFrames = 0;
-        let totalMessages = 0;
-        
+        // WebRTC配置
+        const rtcConfiguration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
         function showStatus(message, type = 'success') {
             const status = document.getElementById('status');
             status.textContent = message;
@@ -249,10 +280,17 @@
             
             setTimeout(() => {
                 status.style.display = 'none';
-            }, 3000);
+            }, 5000);
         }
 
-        function connect() {
+        function updateConnectionInfo(field, value) {
+            const element = document.getElementById(field);
+            if (element) {
+                element.textContent = value;
+            }
+        }
+
+        async function connect() {
             const clientId = document.getElementById('clientId').value.trim();
             const authCode = document.getElementById('authCode').value.trim();
 
@@ -261,94 +299,282 @@
                 return;
             }
 
-            showStatus('正在连接...', 'info');
+            // 保存当前客户端ID
+            currentClientId = clientId;
 
-            ws = new WebSocket(`ws://${location.host}/ws`);
+            showStatus('正在连接信令服务器...', 'info');
+            document.getElementById('connectionInfo').style.display = 'block';
 
-            ws.onopen = function() {
-                console.log('WebSocket连接已建立');
+            try {
+                // 1. 连接信令服务器
+                await connectSignalingServer(clientId, authCode);
                 
-                const connectMessage = {
-                    type: 'BrowserConnect',
-                    client_id: clientId,
-                    auth_code: authCode
+                // 2. 初始化WebRTC
+                await initWebRTC();
+                
+                // 3. 创建Offer
+                await createOffer(clientId);
+                
+            } catch (error) {
+                console.error('连接失败:', error);
+                showStatus(`连接失败: ${error.message}`, 'error');
+            }
+        }
+
+        function connectSignalingServer(clientId, authCode) {
+            return new Promise((resolve, reject) => {
+                signalingSocket = new WebSocket(`ws://${location.host}/ws`);
+
+                signalingSocket.onopen = function() {
+                    console.log('📡 信令服务器连接已建立');
+                    updateConnectionInfo('signalingState', '已连接');
+                    
+                    const connectMessage = {
+                        type: 'BrowserConnect',
+                        client_id: clientId,
+                        auth_code: authCode
+                    };
+
+                    signalingSocket.send(JSON.stringify(connectMessage));
                 };
 
-                ws.send(JSON.stringify(connectMessage));
-            };
+                signalingSocket.onmessage = function(event) {
+                    handleSignalingMessage(JSON.parse(event.data));
+                };
 
-            ws.onmessage = function(event) {
-                try {
+                signalingSocket.onclose = function() {
+                    console.log('📡 信令服务器连接已关闭');
+                    updateConnectionInfo('signalingState', '已断开');
+                    showStatus('信令连接已断开', 'error');
+                    resetUI();
+                };
+
+                signalingSocket.onerror = function(error) {
+                    console.error('📡 信令服务器错误:', error);
+                    updateConnectionInfo('signalingState', '错误');
+                    reject(new Error('信令服务器连接失败'));
+                };
+
+                // 等待连接成功消息
+                const originalOnMessage = signalingSocket.onmessage;
+                signalingSocket.onmessage = function(event) {
                     const message = JSON.parse(event.data);
-                    totalMessages++;
+                    if (message.type === 'Connected' && message.success) {
+                        console.log('✅ 信令连接成功');
+                        showStatus('信令连接成功，开始WebRTC协商...', 'info');
+                        signalingSocket.onmessage = originalOnMessage;
+                        resolve();
+                    } else if (message.type === 'Error') {
+                        reject(new Error(message.message));
+                    }
+                };
+            });
+        }
+
+        async function initWebRTC() {
+            console.log('🌐 初始化WebRTC...');
+            
+            // 创建PeerConnection
+            peerConnection = new RTCPeerConnection(rtcConfiguration);
+            
+            // 监听连接状态变化
+            peerConnection.onconnectionstatechange = function() {
+                console.log('🔗 WebRTC连接状态:', peerConnection.connectionState);
+                updateConnectionInfo('connectionState', peerConnection.connectionState);
+                
+                if (peerConnection.connectionState === 'connected') {
+                    showStatus('WebRTC P2P连接已建立！', 'success');
+                    showRemoteDesktop();
+                    initCanvas();
+                } else if (peerConnection.connectionState === 'failed') {
+                    showStatus('WebRTC连接失败', 'error');
+                }
+            };
+            
+            // 监听ICE连接状态
+            peerConnection.oniceconnectionstatechange = function() {
+                console.log('🧊 ICE连接状态:', peerConnection.iceConnectionState);
+                updateConnectionInfo('iceState', peerConnection.iceConnectionState);
+            };
+            
+            // 监听ICE候选
+            peerConnection.onicecandidate = function(event) {
+                if (event.candidate) {
+                    console.log('🧊 发送ICE候选:', event.candidate.candidate);
                     
-                    // 对ScreenData消息进行队列管理
-                    if (message.type === 'ScreenData') {
-                        handleScreenDataMessage(message);
+                    const message = {
+                        type: 'WebRTCIceCandidate',
+                        target_id: currentClientId, // 修复：发送给对应的客户端
+                        ice_candidate: {
+                            candidate: event.candidate.candidate,
+                            sdp_mid: event.candidate.sdpMid,
+                            sdp_mline_index: event.candidate.sdpMLineIndex
+                        }
+                    };
+                    
+                    signalingSocket.send(JSON.stringify(message));
+                }
+            };
+            
+            // 监听数据通道
+            peerConnection.ondatachannel = function(event) {
+                const channel = event.channel;
+                console.log('📡 收到数据通道:', channel.label);
+                setupDataChannel(channel);
+            };
+        }
+
+        async function createOffer(clientId) {
+            console.log('📤 创建WebRTC Offer...');
+            
+            // 创建数据通道（用于控制信号）
+            dataChannel = peerConnection.createDataChannel('control', {
+                ordered: true
+            });
+            
+            setupDataChannel(dataChannel);
+            
+            // 创建Offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            // 发送Offer到客户端
+            const message = {
+                type: 'WebRTCOffer',
+                target_id: clientId,
+                session_description: {
+                    sdp_type: 'offer',
+                    sdp: offer.sdp
+                }
+            };
+            
+            signalingSocket.send(JSON.stringify(message));
+            console.log('📤 Offer已发送');
+        }
+
+        function setupDataChannel(channel) {
+            channel.onopen = function() {
+                console.log('✅ 数据通道已打开:', channel.label);
+                updateConnectionInfo('dataChannelState', '已连接');
+                isConnected = true;
+            };
+            
+            channel.onclose = function() {
+                console.log('❌ 数据通道已关闭:', channel.label);
+                updateConnectionInfo('dataChannelState', '已断开');
+                isConnected = false;
+            };
+            
+            channel.onmessage = function(event) {
+                // 处理来自客户端的屏幕数据
+                try {
+                    // 检查是否是分片数据
+                    if (event.data instanceof ArrayBuffer) {
+                        handleChunkedMessage(event.data);
                     } else {
-                        handleMessage(message);
+                        // 原有的JSON消息处理
+                        const message = JSON.parse(event.data);
+                        console.log('📥 收到WebRTC数据通道消息，类型:', message.type);
+                        
+                        if (message.type === 'ScreenData') {
+                            // 提取实际的屏幕数据 (message 是 WebSocketMessage，实际数据在其字段中)
+                            const screenData = message; // message 本身就包含了所有 ScreenData 字段
+                            console.log('🖼️ 处理屏幕数据:', screenData.width + 'x' + screenData.height);
+                            handleScreenData(screenData);
+                        } else {
+                            console.log('🔍 未知的数据通道消息类型:', message.type);
+                        }
                     }
                 } catch (error) {
-                    console.error('消息解析失败:', error);
+                    console.error('❌ 处理数据通道消息失败:', error);
+                    console.error('原始数据:', event.data);
                 }
             };
-
-            ws.onclose = function() {
-                console.log('WebSocket连接已关闭');
-                showStatus('连接已断开', 'error');
-                resetUI();
-            };
-
-            ws.onerror = function(error) {
-                console.error('WebSocket错误:', error);
-                showStatus('连接错误', 'error');
-            };
-        }
-        
-        // 优化的屏幕数据消息处理
-        function handleScreenDataMessage(message) {
-            // 智能消息队列管理
-            if (message.full_frame) {
-                // 完整帧：清除队列，立即处理
-                messageQueue = [];
-                messageQueue.push(message);
-                processMessageQueue();
-            } else if (message.changed_regions && message.changed_regions.length > 0) {
-                // 差分帧：添加到队列
-                messageQueue.push(message);
-                
-                // 队列管理：如果队列过长，丢弃旧帧
-                if (messageQueue.length > 3) {  // 最多保留3帧
-                    const dropped = messageQueue.shift();
-                    droppedFrames++;
-                    console.log(`⚠️ 丢弃旧帧避免堆积 (队列长度: ${messageQueue.length})`);
-                }
-                
-                processMessageQueue();
-            }
-            // 忽略无变化的帧
-        }
-        
-        // 异步处理消息队列
-        async function processMessageQueue() {
-            if (isProcessingQueue || messageQueue.length === 0) {
-                return;
-            }
             
-            isProcessingQueue = true;
+            channel.onerror = function(error) {
+                console.error('数据通道错误:', error);
+                updateConnectionInfo('dataChannelState', '错误');
+            };
+        }
+
+        function handleSignalingMessage(message) {
+            console.log('📥 收到信令消息:', message.type);
             
-            try {
-                while (messageQueue.length > 0) {
-                    const message = messageQueue.shift();
-                    await updateDesktopAsync(message);
-                }
-            } catch (error) {
-                console.error('处理消息队列失败:', error);
-            } finally {
-                isProcessingQueue = false;
+            switch (message.type) {
+                case 'WebRTCAnswer':
+                    handleAnswer(message.session_description);
+                    break;
+                    
+                case 'WebRTCIceCandidate':
+                    handleIceCandidate(message.ice_candidate);
+                    break;
+                    
+                case 'Error':
+                    showStatus(message.message, 'error');
+                    break;
+                    
+                default:
+                    console.log('未知信令消息类型:', message.type);
             }
         }
-        
+
+        async function handleAnswer(sessionDescription) {
+            console.log('📥 处理WebRTC Answer');
+            
+            const answer = new RTCSessionDescription({
+                type: 'answer',
+                sdp: sessionDescription.sdp
+            });
+            
+            await peerConnection.setRemoteDescription(answer);
+            console.log('✅ Answer已设置');
+        }
+
+        async function handleIceCandidate(iceCandidate) {
+            console.log('🧊 添加ICE候选:', iceCandidate.candidate);
+            
+            const candidate = new RTCIceCandidate({
+                candidate: iceCandidate.candidate,
+                sdpMid: iceCandidate.sdp_mid,
+                sdpMLineIndex: iceCandidate.sdp_mline_index
+            });
+            
+            await peerConnection.addIceCandidate(candidate);
+        }
+
+        function handleScreenData(screenData) {
+            updateDesktopAsync(screenData);
+        }
+
+        function showRemoteDesktop() {
+            document.getElementById('loginSection').style.display = 'none';
+            document.getElementById('remoteDesktop').classList.add('active');
+        }
+
+        function initCanvas() {
+            canvas = document.getElementById('desktopCanvas');
+            ctx = canvas.getContext('2d');
+            
+            // 启用图像平滑处理
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+
+            // 添加鼠标事件监听
+            canvas.addEventListener('click', handleMouseClick);
+            canvas.addEventListener('mousemove', throttle(handleMouseMove, 16)); // 限制到60fps
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+            
+            // 添加键盘事件监听
+            document.addEventListener('keydown', handleKeyDown);
+            document.addEventListener('keyup', handleKeyUp);
+
+            // 隐藏加载提示
+            document.getElementById('loading').style.display = 'none';
+            
+            console.log('画布初始化完成，开始性能监控');
+            startPerformanceMonitoring();
+        }
+
         // 异步版本的桌面更新
         async function updateDesktopAsync(screenData) {
             const startTime = performance.now();
@@ -366,7 +592,7 @@
                 await updateDifferentialFrameAsync(screenData, startTime);
             }
         }
-        
+
         // 异步完整帧更新
         function updateFullFrameAsync(screenData, startTime) {
             return new Promise((resolve, reject) => {
@@ -411,7 +637,7 @@
                 img.src = `data:${mimeType};base64,${screenData.image_data}`;
             });
         }
-        
+
         // 优化的异步差分帧更新 - 并行加载
         function updateDifferentialFrameAsync(screenData, startTime) {
             return new Promise((resolve) => {
@@ -459,7 +685,7 @@
                 });
             });
         }
-        
+
         // 加载单个区域图像
         function loadRegionImage(region) {
             return new Promise((resolve, reject) => {
@@ -472,57 +698,6 @@
             });
         }
 
-        function handleMessage(message) {
-            switch (message.type) {
-                case 'Connected':
-                    if (message.success) {
-                        isConnected = true;
-                        showStatus('连接成功', 'success');
-                        showRemoteDesktop();
-                        initCanvas();
-                    } else {
-                        showStatus(message.message, 'error');
-                    }
-                    break;
-
-                case 'Error':
-                    showStatus(message.message, 'error');
-                    break;
-
-                default:
-                    console.log('未知消息类型:', message.type);
-            }
-        }
-
-        function showRemoteDesktop() {
-            document.getElementById('loginSection').style.display = 'none';
-            document.getElementById('remoteDesktop').classList.add('active');
-        }
-
-        function initCanvas() {
-            canvas = document.getElementById('desktopCanvas');
-            ctx = canvas.getContext('2d');
-            
-            // 启用图像平滑处理
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high';
-
-            // 添加鼠标事件监听
-            canvas.addEventListener('click', handleMouseClick);
-            canvas.addEventListener('mousemove', throttle(handleMouseMove, 16)); // 限制到60fps
-            canvas.addEventListener('contextmenu', e => e.preventDefault());
-            
-            // 添加键盘事件监听
-            document.addEventListener('keydown', handleKeyDown);
-            document.addEventListener('keyup', handleKeyUp);
-
-            // 隐藏加载提示
-            document.getElementById('loading').style.display = 'none';
-            
-            console.log('画布初始化完成，开始性能监控');
-            startPerformanceMonitoring();
-        }
-        
         // 节流函数
         function throttle(func, limit) {
             let inThrottle;
@@ -536,7 +711,7 @@
                 }
             }
         }
-        
+
         // 智能渲染调度 - 避免过度重绘
         function scheduleRender() {
             if (isRendering) {
@@ -559,7 +734,7 @@
                 }, FRAME_TIME - elapsed);
             }
         }
-        
+
         function performRender() {
             if (isRendering) return;
             
@@ -582,7 +757,7 @@
                 }
             });
         }
-        
+
         // 性能监控
         function recordRenderTime(time) {
             renderTimes.push(time);
@@ -590,7 +765,7 @@
                 renderTimes.shift();
             }
         }
-        
+
         function startPerformanceMonitoring() {
             setInterval(() => {
                 const now = Date.now();
@@ -601,28 +776,21 @@
                     const avgRenderTime = renderTimes.length > 0 ? 
                         (renderTimes.reduce((a, b) => a + b, 0) / renderTimes.length).toFixed(2) : 0;
                     
-                    const queueEfficiency = totalMessages > 0 ? 
-                        ((totalMessages - droppedFrames) / totalMessages * 100).toFixed(1) : 100;
-                    
-                    console.log(`📊 性能统计 [${elapsed/1000}秒]:
+                    console.log(`📊 WebRTC性能统计 [${elapsed/1000}秒]:
 🎯 渲染帧率: ${fps} FPS
 ⏱️ 平均渲染时间: ${avgRenderTime}ms  
-📦 总帧数: ${frameCount}
-📨 消息效率: ${queueEfficiency}% (丢弃${droppedFrames}/${totalMessages})
-🔄 队列长度: ${messageQueue.length}`);
+📦 总帧数: ${frameCount}`);
                     
                     // 重置计数器
                     frameCount = 0;
                     lastStatsTime = now;
                     renderTimes.length = 0;
-                    droppedFrames = 0;
-                    totalMessages = 0;
                 }
             }, 1000);
         }
 
         function handleMouseClick(event) {
-            if (!isConnected || !ws) return;
+            if (!isConnected || !dataChannel) return;
 
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
@@ -639,11 +807,11 @@
                 event_type: 'click'
             };
 
-            ws.send(JSON.stringify(mouseEvent));
+            dataChannel.send(JSON.stringify(mouseEvent));
         }
 
         function handleMouseMove(event) {
-            if (!isConnected || !ws) return;
+            if (!isConnected || !dataChannel) return;
 
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
@@ -660,11 +828,11 @@
                 event_type: 'move'
             };
 
-            ws.send(JSON.stringify(mouseEvent));
+            dataChannel.send(JSON.stringify(mouseEvent));
         }
 
         function handleKeyDown(event) {
-            if (!isConnected || !ws) return;
+            if (!isConnected || !dataChannel) return;
 
             event.preventDefault();
 
@@ -674,11 +842,11 @@
                 event_type: 'press'
             };
 
-            ws.send(JSON.stringify(keyboardEvent));
+            dataChannel.send(JSON.stringify(keyboardEvent));
         }
 
         function handleKeyUp(event) {
-            if (!isConnected || !ws) return;
+            if (!isConnected || !dataChannel) return;
 
             event.preventDefault();
 
@@ -688,41 +856,141 @@
                 event_type: 'release'
             };
 
-            ws.send(JSON.stringify(keyboardEvent));
+            dataChannel.send(JSON.stringify(keyboardEvent));
         }
 
         function disconnect() {
-            if (ws) {
+            if (dataChannel) {
+                dataChannel.close();
+            }
+            
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            
+            if (signalingSocket) {
                 const disconnectMessage = {
                     type: 'Disconnect'
                 };
-                ws.send(JSON.stringify(disconnectMessage));
-                ws.close();
+                signalingSocket.send(JSON.stringify(disconnectMessage));
+                signalingSocket.close();
             }
             
             resetUI();
-            showStatus('已断开连接', 'success');
+            showStatus('已断开WebRTC连接', 'success');
         }
 
         function resetUI() {
             isConnected = false;
             document.getElementById('loginSection').style.display = 'block';
             document.getElementById('remoteDesktop').classList.remove('active');
+            document.getElementById('connectionInfo').style.display = 'none';
             document.getElementById('loading').style.display = 'block';
             
             // 清除输入框
             document.getElementById('clientId').value = '';
             document.getElementById('authCode').value = '';
             
+            // 重置连接状态显示
+            updateConnectionInfo('connectionState', '未连接');
+            updateConnectionInfo('signalingState', '未连接');
+            updateConnectionInfo('iceState', '未连接');
+            updateConnectionInfo('dataChannelState', '未连接');
+            
             // 重置性能监控
             frameCount = 0;
             lastStatsTime = Date.now();
             renderTimes.length = 0;
+            
+            // 清理WebRTC对象
+            peerConnection = null;
+            dataChannel = null;
+            signalingSocket = null;
+        }
+
+        // 处理分片消息
+        function handleChunkedMessage(arrayBuffer) {
+            try {
+                const dataView = new DataView(arrayBuffer);
+                
+                // 读取头长度（前2字节）
+                const headerLength = dataView.getUint16(0, true); // little-endian
+                
+                // 读取头数据
+                const headerBytes = new Uint8Array(arrayBuffer, 2, headerLength);
+                const headerText = new TextDecoder().decode(headerBytes);
+                const chunkHeader = JSON.parse(headerText);
+                
+                // 读取分片数据
+                const chunkData = new Uint8Array(arrayBuffer, 2 + headerLength);
+                
+                console.log(`📦 收到分片 ${chunkHeader.chunk_index + 1}/${chunkHeader.total_chunks}，头部: ${headerLength} bytes，数据: ${chunkData.length} bytes`);
+                
+                // 获取或创建分片缓冲区
+                let chunkBuffer = chunkBuffers.get(chunkHeader.message_id);
+                if (!chunkBuffer) {
+                    chunkBuffer = {
+                        chunks: new Array(chunkHeader.total_chunks),
+                        totalChunks: chunkHeader.total_chunks,
+                        totalSize: chunkHeader.total_size,
+                        receivedChunks: 0
+                    };
+                    chunkBuffers.set(chunkHeader.message_id, chunkBuffer);
+                    console.log(`🆕 创建新的分片缓冲区，消息ID: ${chunkHeader.message_id}，总分片数: ${chunkHeader.total_chunks}`);
+                }
+                
+                // 存储当前分片
+                if (!chunkBuffer.chunks[chunkHeader.chunk_index]) {
+                    chunkBuffer.chunks[chunkHeader.chunk_index] = chunkData;
+                    chunkBuffer.receivedChunks++;
+                    
+                    console.log(`📦 分片 ${chunkHeader.chunk_index + 1} 已存储，已收到 ${chunkBuffer.receivedChunks}/${chunkBuffer.totalChunks} 分片`);
+                }
+                
+                // 检查是否接收完所有分片
+                if (chunkBuffer.receivedChunks === chunkBuffer.totalChunks) {
+                    console.log('🔧 开始重组分片数据...');
+                    
+                    // 重组数据
+                    const totalBytes = new Uint8Array(chunkBuffer.totalSize);
+                    let offset = 0;
+                    
+                    for (let i = 0; i < chunkBuffer.totalChunks; i++) {
+                        const chunk = chunkBuffer.chunks[i];
+                        if (chunk) {
+                            totalBytes.set(chunk, offset);
+                            offset += chunk.length;
+                        } else {
+                            console.error(`❌ 缺少分片 ${i + 1}`);
+                            return;
+                        }
+                    }
+                    
+                    // 解析重组后的JSON数据
+                    const jsonText = new TextDecoder().decode(totalBytes);
+                    const message = JSON.parse(jsonText);
+                    
+                    console.log('✅ 分片重组完成，数据大小:', totalBytes.length, 'bytes');
+                    
+                    // 处理重组后的消息
+                    if (message.type === 'ScreenData') {
+                        const screenData = message;
+                        console.log('🖼️ 处理重组屏幕数据:', screenData.width + 'x' + screenData.height);
+                        handleScreenData(screenData);
+                    }
+                    
+                    // 清理缓冲区
+                    chunkBuffers.delete(chunkHeader.message_id);
+                }
+                
+            } catch (error) {
+                console.error('❌ 处理分片消息失败:', error);
+            }
         }
 
         // 页面加载完成后的初始化
         window.addEventListener('load', function() {
-            console.log('🚀 远程桌面控制页面已加载 (性能优化版本)');
+            console.log('🚀 WebRTC远程桌面控制页面已加载');
         });
     </script>
 </body>

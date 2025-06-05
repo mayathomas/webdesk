@@ -22,6 +22,21 @@ pub struct BrowserConnectRequest {
     pub auth_code: String,
 }
 
+/// WebRTC SDP 会话描述
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDescription {
+    pub sdp_type: String, // "offer", "answer"
+    pub sdp: String,
+}
+
+/// WebRTC ICE 候选
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IceCandidate {
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_mline_index: Option<u16>,
+}
+
 /// 屏幕截图数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenData {
@@ -60,28 +75,44 @@ pub struct KeyboardEvent {
     pub event_type: String, // "press", "release"
 }
 
-/// WebSocket消息类型
+/// WebSocket消息类型（保持兼容，作为信令服务器）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebSocketMessage {
-    // 客户端消息
+    // 客户端注册和基础消息
     Register(RegisterRequest),
-    ScreenData(ScreenData),
-    Ping,
-    
-    // 浏览器消息
-    BrowserConnect(BrowserConnectRequest),
-    MouseEvent(MouseEvent),
-    KeyboardEvent(KeyboardEvent),
-    Disconnect,
-    
-    // 服务端响应
     RegisterResponse(RegisterResponse),
+    
+    // 浏览器连接消息
+    BrowserConnect(BrowserConnectRequest),
     Connected { success: bool, message: String },
     BrowserConnected { message: String },
     BrowserDisconnected { message: String },
-    Error { message: String },
+    
+    // WebRTC 信令消息
+    WebRTCOffer { 
+        target_id: String, // 目标客户端ID
+        session_description: SessionDescription 
+    },
+    WebRTCAnswer { 
+        target_id: String, // 目标浏览器ID
+        session_description: SessionDescription 
+    },
+    WebRTCIceCandidate { 
+        target_id: String, // 目标ID
+        ice_candidate: IceCandidate 
+    },
+    
+    // 传统WebSocket消息（向后兼容）
+    ScreenData(ScreenData),
+    MouseEvent(MouseEvent),
+    KeyboardEvent(KeyboardEvent),
+    
+    // 控制消息
+    Disconnect,
+    Ping,
     Pong,
+    Error { message: String },
 }
 
 /// 客户端状态

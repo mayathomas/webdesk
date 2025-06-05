@@ -46,10 +46,20 @@ impl ScreenCaptureService {
     
     /// 捕获屏幕并返回优化后的数据
     pub fn capture_screen_optimized(&mut self, capturer: &mut Capturer) -> Result<(String, u32, u32, String, bool, Option<Vec<ChangedRegion>>)> {
-        let width = capturer.width() as u32;
-        let height = capturer.height() as u32;
+        let start_time = std::time::Instant::now();
+        
+        let original_width = capturer.width() as u32;
+        let original_height = capturer.height() as u32;
+        
+        // 调试：输出分辨率信息（仅首次）
+        if self.frame_count == 0 {
+            println!("📊 原始分辨率: {}x{} ({:.1}MP)", original_width, original_height, (original_width * original_height) as f64 / 1_000_000.0);
+            let estimated_size = (original_width * original_height * 3) as f64 / 1_000_000.0; // RGB估算
+            println!("📊 估算未压缩大小: {:.1}MB", estimated_size);
+        }
         
         // 捕获原始帧数据
+        let capture_start = std::time::Instant::now();
         let buffer = loop {
             match capturer.frame() {
                 Ok(buffer) => break buffer,
@@ -63,16 +73,36 @@ impl ScreenCaptureService {
                 }
             }
         };
+        let capture_time = capture_start.elapsed();
 
-        // 将BGRA格式转换为RGBA
+        // 格式转换 - 优化的BGRA到RGBA转换
+        let convert_start = std::time::Instant::now();
         let mut rgba_data = Vec::with_capacity(buffer.len());
-        for chunk in buffer.chunks(4) {
-            if chunk.len() == 4 {
-                rgba_data.push(chunk[2]); // R
-                rgba_data.push(chunk[1]); // G
-                rgba_data.push(chunk[0]); // B
-                rgba_data.push(chunk[3]); // A
+        
+        // 使用批处理方式，4个字节一组处理
+        let chunk_count = buffer.len() / 4;
+        rgba_data.reserve_exact(buffer.len());
+        
+        for i in 0..chunk_count {
+            let base = i * 4;
+            if base + 3 < buffer.len() {
+                rgba_data.push(buffer[base + 2]); // R (from B)
+                rgba_data.push(buffer[base + 1]); // G 
+                rgba_data.push(buffer[base + 0]); // B (from R)
+                rgba_data.push(buffer[base + 3]); // A
             }
+        }
+        let convert_time = convert_start.elapsed();
+
+        // 立即进行分辨率缩放以减少后续处理的数据量
+        let scale_start = std::time::Instant::now();
+        let (width, height, rgba_data) = self.scale_frame_if_needed(original_width, original_height, rgba_data)?;
+        let scale_time = scale_start.elapsed();
+
+        // 性能统计（每10帧输出一次）
+        if self.frame_count % 10 == 0 {
+            println!("⏱️ 性能统计 - 捕获: {:?}, 转换: {:?}, 缩放: {:?}, 总计: {:?}", 
+                capture_time, convert_time, scale_time, start_time.elapsed());
         }
 
         let current_frame = ScreenFrame {
@@ -83,12 +113,13 @@ impl ScreenCaptureService {
 
         self.frame_count += 1;
         
-        // 每60帧强制发送一次完整帧，或者第一帧（降低全帧频率）
-        let force_full_frame = self.frame_count % 60 == 1 || self.last_frame.is_none();
+        // 根据业界最佳实践：远程控制应该更频繁发送全帧以减少延迟
+        // 从每60帧改为每30帧发送一次全帧（从2秒改为1秒）
+        let force_full_frame = self.frame_count % 30 == 1 || self.last_frame.is_none();
         
         if force_full_frame {
-            // 发送完整的JPEG帧
-            let jpeg_data = self.encode_jpeg(&rgba_data, width, height, 75)?;
+            // 发送完整的JPEG帧 - 大幅降低质量以减少数据量（参考Multi经验）
+            let jpeg_data = self.encode_jpeg(&rgba_data, width, height, 35)?;  // 从60降到35
             let base64_data = general_purpose::STANDARD.encode(&jpeg_data);
             
             self.last_frame = Some(current_frame);
@@ -109,7 +140,7 @@ impl ScreenCaptureService {
                 }
             } else {
                 // 没有上一帧，发送完整帧
-                let jpeg_data = self.encode_jpeg(&rgba_data, width, height, 75)?;
+                let jpeg_data = self.encode_jpeg(&rgba_data, width, height, 35)?;  // 从60降到35
                 let base64_data = general_purpose::STANDARD.encode(&jpeg_data);
                 
                 self.last_frame = Some(current_frame);
@@ -144,14 +175,35 @@ impl ScreenCaptureService {
         Ok(jpeg_buffer)
     }
     
+    /// 计算目标分辨率 - 根据业界最佳实践
+    fn calculate_target_resolution(width: u32, height: u32) -> (u32, u32) {
+        // 调整为720p以进一步减少数据量和延迟
+        const MAX_WIDTH: u32 = 1280;   // 720p宽度
+        const MAX_HEIGHT: u32 = 720;   // 720p高度
+        const MAX_PIXELS: u32 = MAX_WIDTH * MAX_HEIGHT; // 约0.9M像素
+        
+        let total_pixels = width * height;
+        
+        // 如果像素数超过上限，按比例缩放
+        if total_pixels > MAX_PIXELS {
+            let scale_factor = (MAX_PIXELS as f64 / total_pixels as f64).sqrt();
+            let new_width = (width as f64 * scale_factor) as u32;
+            let new_height = (height as f64 * scale_factor) as u32;
+            println!("📏 自动缩放: {}*{}像素 -> {}*{}像素 (缩放比例: {:.2})", width, height, new_width, new_height, scale_factor);
+            (new_width, new_height)
+        } else {
+            (width, height)
+        }
+    }
+    
     /// 检测帧之间的变化区域
     fn detect_changes(&self, last_frame: &ScreenFrame, current_frame: &ScreenFrame) -> Result<Vec<ChangedRegion>> {
         if last_frame.width != current_frame.width || last_frame.height != current_frame.height {
             return Err(anyhow::anyhow!("帧尺寸不匹配"));
         }
         
-        const BLOCK_SIZE: u32 = 64; // 64x64像素块
-        const THRESHOLD: u32 = 5; // 降低变化阈值，更敏感（原来10，现在5）
+        const BLOCK_SIZE: u32 = 64; // 恢复到64x64，因为现在在缩放后的分辨率上工作
+        const THRESHOLD: u32 = 10; // 适当提高阈值，减少过于敏感的检测
         
         let mut changed_regions = Vec::new();
         let width = current_frame.width;
@@ -183,8 +235,8 @@ impl ScreenCaptureService {
                         block_height
                     )?;
                     
-                    // 压缩块数据为JPEG
-                    let jpeg_data = self.encode_jpeg(&block_data, block_width, block_height, 80)?;
+                    // 压缩块数据为JPEG - 对差分块使用更低质量以减少数据量
+                    let jpeg_data = self.encode_jpeg(&block_data, block_width, block_height, 45)?;  // 从70降到45
                     let base64_data = general_purpose::STANDARD.encode(&jpeg_data);
                     
                     changed_regions.push(ChangedRegion {
@@ -235,8 +287,9 @@ impl ScreenCaptureService {
             }
         }
         
-        // 降低像素变化比例要求：从5%降到1%，更敏感检测
-        Ok(changed_pixels > total_pixels / 100)  // 1% = 1/100 (原来是1/20=5%)
+        // 调整像素变化比例要求：平衡敏感度和性能
+        // 从1%调整到2%，减少过于频繁的块更新
+        Ok(changed_pixels > total_pixels / 50)  // 2% = 1/50
     }
     
     /// 提取块数据
@@ -334,5 +387,35 @@ impl ScreenCaptureService {
         let display = Display::primary()?;
         let capturer = Capturer::new(display)?;
         Ok((capturer.width() as u32, capturer.height() as u32))
+    }
+
+    /// 根据需要缩放帧数据
+    fn scale_frame_if_needed(&mut self, width: u32, height: u32, rgba_data: Vec<u8>) -> Result<(u32, u32, Vec<u8>)> {
+        let (target_width, target_height) = Self::calculate_target_resolution(width, height);
+        
+        // 如果不需要缩放，直接返回
+        if width == target_width && height == target_height {
+            return Ok((width, height, rgba_data));
+        }
+        
+        // 需要缩放，仅在首次缩放时打印信息
+        if self.frame_count == 0 {
+            println!("📏 自动缩放帧: {}x{} -> {}x{} (减少 {:.1}% 像素)", 
+                width, height, target_width, target_height,
+                (1.0 - (target_width * target_height) as f64 / (width * height) as f64) * 100.0);
+        }
+        
+        // 创建RGBA图像
+        let image = image::RgbaImage::from_raw(width, height, rgba_data)
+            .ok_or_else(|| anyhow::anyhow!("创建RGBA图像失败"))?;
+        
+        // 使用最快的Nearest滤波器，虽然质量较低但速度最快
+        // 对于屏幕共享，速度比质量更重要
+        let resized = image::imageops::resize(&image, target_width, target_height, image::imageops::FilterType::Nearest);
+        
+        // 转换回Vec<u8>
+        let resized_data = resized.into_raw();
+        
+        Ok((target_width, target_height, resized_data))
     }
 } 

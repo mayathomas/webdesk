@@ -10,7 +10,7 @@ async fn main() -> Result<()> {
     
     // 使用固定配置 - 只需要一个端口
     let host = "127.0.0.1";
-    let port = 8080;
+    let port = 3000;
     
     println!("📡 服务器地址: http://{}:{}", host, port);
     println!("💡 打开浏览器访问上面的地址即可开始远程控制");

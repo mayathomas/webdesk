@@ -17,7 +17,10 @@ pub fn screen_capture_thread(
     let mut screen_service = ScreenCaptureService::new();
     let mut active = false;
     let mut last_capture = std::time::Instant::now();
-    let capture_interval = Duration::from_millis(80); // 提高到12.5 FPS，确保达到10+ FPS实际输出
+    
+    // 根据业界最佳实践：远程控制需要更高的帧率以减少延迟
+    // 进一步提升到 25FPS (40ms)，接近30FPS的理想值
+    let capture_interval = Duration::from_millis(40); // 25 FPS，更流畅的体验
     
     loop {
         // 检查控制信号（非阻塞）
@@ -81,8 +84,8 @@ pub fn screen_capture_thread(
             }
         }
         
-        // 短暂休眠避免忙等待
-        std::thread::sleep(Duration::from_millis(10));
+        // 进一步减少休眠时间，提高响应速度
+        std::thread::sleep(Duration::from_millis(2)); // 从5ms减少到2ms，更快的控制循环
     }
     
     println!("📷 屏幕捕获线程已停止");

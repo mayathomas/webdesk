@@ -13,7 +13,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            server_url: "ws://127.0.0.1:8080/ws".to_string(),
+            server_url: "ws://127.0.0.1:3000/ws".to_string(),
             client_id: None,
             auth_code: generate_auth_code(),
         }

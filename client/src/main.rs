@@ -6,6 +6,7 @@ mod state;
 mod commands;
 mod network;
 mod threads;
+mod webrtc;
 
 use anyhow::Result;
 use config::ClientConfig;
