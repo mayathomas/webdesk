@@ -1,7 +1,6 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 use tauri::{AppHandle, Emitter};
