@@ -44,7 +44,6 @@ pub fn screen_capture_thread(
                     // 保存用于日志的值
                     let log_format = format.clone();
                     let log_regions_count = changed_regions.as_ref().map(|r| r.len()).unwrap_or(0);
-                    let has_data = !image_data.is_empty() || log_regions_count > 0;
                     
                     let screen_data = WebSocketMessage::ScreenData(ScreenData {
                         image_data,
@@ -67,12 +66,10 @@ pub fn screen_capture_thread(
                         println!("📷 发送差分数据: {} 个变化区域", log_regions_count);
                     } else {
                         // 每10次无变化才打印一次，避免日志垃圾
-                        static mut NO_CHANGE_COUNT: u32 = 0;
-                        unsafe {
-                            NO_CHANGE_COUNT += 1;
-                            if NO_CHANGE_COUNT % 10 == 0 {
-                                println!("📷 连续{}次无屏幕变化", NO_CHANGE_COUNT);
-                            }
+                        let mut no_change_count: u32 = 0;
+                        no_change_count += 1;
+                        if no_change_count % 10 == 0 {
+                            println!("📷 连续{}次无屏幕变化", no_change_count);
                         }
                     }
                     

@@ -121,7 +121,6 @@ pub enum WebSocketMessage {
 pub enum ClientState {
     WaitingForRegistration,
     WaitingForBrowser,
-    BrowserConnected,
     WebRTCConnecting, // 新增：WebRTC连接中
     WebRTCConnected,  // 新增：WebRTC已连接
     Idle,
