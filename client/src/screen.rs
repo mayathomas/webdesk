@@ -83,8 +83,8 @@ impl ScreenCaptureService {
 
         self.frame_count += 1;
         
-        // 每30帧强制发送一次完整帧，或者第一帧
-        let force_full_frame = self.frame_count % 30 == 1 || self.last_frame.is_none();
+        // 每60帧强制发送一次完整帧，或者第一帧（降低全帧频率）
+        let force_full_frame = self.frame_count % 60 == 1 || self.last_frame.is_none();
         
         if force_full_frame {
             // 发送完整的JPEG帧
@@ -151,7 +151,7 @@ impl ScreenCaptureService {
         }
         
         const BLOCK_SIZE: u32 = 64; // 64x64像素块
-        const THRESHOLD: u32 = 10; // 变化阈值（每个通道）
+        const THRESHOLD: u32 = 5; // 降低变化阈值，更敏感（原来10，现在5）
         
         let mut changed_regions = Vec::new();
         let width = current_frame.width;
@@ -235,8 +235,8 @@ impl ScreenCaptureService {
             }
         }
         
-        // 如果超过5%的像素发生变化，认为这个块有变化
-        Ok(changed_pixels > total_pixels / 20)
+        // 降低像素变化比例要求：从5%降到1%，更敏感检测
+        Ok(changed_pixels > total_pixels / 100)  // 1% = 1/100 (原来是1/20=5%)
     }
     
     /// 提取块数据

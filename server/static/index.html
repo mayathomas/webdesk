@@ -225,6 +225,18 @@
         // 用于存储完整的桌面图像和差分更新
         let desktopCanvas = null;
         let desktopCtx = null;
+        
+        // 性能监控
+        let frameCount = 0;
+        let lastStatsTime = Date.now();
+        let renderTimes = [];
+        
+        // 渲染优化
+        let isRendering = false;
+        let pendingUpdate = false;
+        let lastRenderTime = 0;
+        const TARGET_FPS = 60;
+        const FRAME_TIME = 1000 / TARGET_FPS;
 
         function showStatus(message, type = 'success') {
             const status = document.getElementById('status');
@@ -265,7 +277,6 @@
             };
 
             ws.onmessage = function(event) {
-                console.log('收到服务器消息:', event.data);
                 try {
                     const message = JSON.parse(event.data);
                     handleMessage(message);
@@ -322,10 +333,14 @@
         function initCanvas() {
             canvas = document.getElementById('desktopCanvas');
             ctx = canvas.getContext('2d');
+            
+            // 启用图像平滑处理
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
 
             // 添加鼠标事件监听
             canvas.addEventListener('click', handleMouseClick);
-            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mousemove', throttle(handleMouseMove, 16)); // 限制到60fps
             canvas.addEventListener('contextmenu', e => e.preventDefault());
             
             // 添加键盘事件监听
@@ -334,83 +349,217 @@
 
             // 隐藏加载提示
             document.getElementById('loading').style.display = 'none';
+            
+            console.log('画布初始化完成，开始性能监控');
+            startPerformanceMonitoring();
+        }
+        
+        // 节流函数
+        function throttle(func, limit) {
+            let inThrottle;
+            return function() {
+                const args = arguments;
+                const context = this;
+                if (!inThrottle) {
+                    func.apply(context, args);
+                    inThrottle = true;
+                    setTimeout(() => inThrottle = false, limit);
+                }
+            }
         }
 
         function updateDesktop(screenData) {
-            console.log('收到屏幕数据:', {
-                width: screenData.width,
-                height: screenData.height,
-                format: screenData.format,
-                fullFrame: screenData.full_frame,
-                dataLength: screenData.image_data ? screenData.image_data.length : 0,
-                changedRegions: screenData.changed_regions ? screenData.changed_regions.length : 0
-            });
+            const startTime = performance.now();
             
             // 初始化桌面画布（如果需要）
             if (!desktopCanvas) {
                 desktopCanvas = document.createElement('canvas');
                 desktopCtx = desktopCanvas.getContext('2d');
+                // 启用硬件加速
+                desktopCtx.imageSmoothingEnabled = false; // 差分更新不需要平滑
             }
             
             if (screenData.full_frame && screenData.image_data) {
-                // 处理完整帧
-                const img = new Image();
-                img.onload = function() {
-                    console.log('完整帧加载成功:', img.width, 'x', img.height, '格式:', screenData.format);
-                    
-                    // 更新画布尺寸
-                    canvas.width = screenData.width;
-                    canvas.height = screenData.height;
-                    desktopCanvas.width = screenData.width;
-                    desktopCanvas.height = screenData.height;
-                    
-                    // 绘制到桌面画布
-                    desktopCtx.drawImage(img, 0, 0);
-                    
-                    // 复制到显示画布
-                    ctx.drawImage(desktopCanvas, 0, 0);
-                    
-                    console.log('完整帧已绘制到画布');
-                };
-                img.onerror = function() {
-                    console.error('完整帧图像加载失败');
-                };
-                
-                // 根据格式设置正确的数据URL
-                const mimeType = screenData.format === 'jpeg' ? 'image/jpeg' : 'image/png';
-                img.src = `data:${mimeType};base64,${screenData.image_data}`;
+                // 处理完整帧 - 高优先级，立即处理
+                updateFullFrame(screenData, startTime);
                 
             } else if (screenData.changed_regions && screenData.changed_regions.length > 0) {
-                // 处理差分更新
-                console.log(`处理差分更新: ${screenData.changed_regions.length} 个区域`);
+                // 处理差分更新 - 优化版本
+                updateDifferentialFrame(screenData, startTime);
                 
-                let loadedRegions = 0;
-                const totalRegions = screenData.changed_regions.length;
-                
-                screenData.changed_regions.forEach(region => {
-                    const img = new Image();
-                    img.onload = function() {
-                        // 绘制到桌面画布的指定位置
-                        desktopCtx.drawImage(img, region.x, region.y);
-                        
-                        loadedRegions++;
-                        if (loadedRegions === totalRegions) {
-                            // 所有区域加载完成，更新显示画布
-                            ctx.drawImage(desktopCanvas, 0, 0);
-                            console.log(`差分更新完成: ${totalRegions} 个区域`);
-                        }
-                    };
-                    img.onerror = function() {
-                        console.error('差分区域图像加载失败:', region);
-                    };
-                    
-                    // 差分区域通常是JPEG格式
-                    img.src = `data:image/jpeg;base64,${region.data}`;
-                });
             } else {
-                // 没有变化的帧，无需更新
+                // 没有变化的帧
                 console.log('没有屏幕变化，跳过更新');
             }
+        }
+
+        function updateFullFrame(screenData, startTime) {
+            console.log(`🖼️ 处理完整帧: ${screenData.width}x${screenData.height} (${screenData.format})`);
+            
+            const img = new Image();
+            img.onload = function() {
+                try {
+                    // 更新画布尺寸
+                    if (canvas.width !== screenData.width || canvas.height !== screenData.height) {
+                        canvas.width = screenData.width;
+                        canvas.height = screenData.height;
+                        desktopCanvas.width = screenData.width;
+                        desktopCanvas.height = screenData.height;
+                        console.log(`画布尺寸已更新: ${screenData.width}x${screenData.height}`);
+                    }
+                    
+                    // 直接绘制到离屏画布
+                    desktopCtx.drawImage(img, 0, 0);
+                    
+                    // 立即更新显示
+                    requestAnimationFrame(() => {
+                        ctx.drawImage(desktopCanvas, 0, 0);
+                        
+                        const renderTime = performance.now() - startTime;
+                        recordRenderTime(renderTime);
+                        frameCount++;
+                        
+                        console.log(`✅ 完整帧渲染完成，耗时: ${renderTime.toFixed(2)}ms`);
+                    });
+                    
+                } catch (error) {
+                    console.error('完整帧渲染失败:', error);
+                }
+            };
+            
+            img.onerror = function() {
+                console.error('❌ 完整帧图像加载失败');
+            };
+            
+            // 设置图像源
+            const mimeType = screenData.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+            img.src = `data:${mimeType};base64,${screenData.image_data}`;
+        }
+
+        function updateDifferentialFrame(screenData, startTime) {
+            const regions = screenData.changed_regions;
+            console.log(`🔄 处理差分更新: ${regions.length} 个区域`);
+            
+            let loadedRegions = 0;
+            let hasError = false;
+            const regionImages = [];
+            
+            // 批处理加载所有区域
+            regions.forEach((region, index) => {
+                const img = new Image();
+                regionImages[index] = { img, region, loaded: false };
+                
+                img.onload = function() {
+                    if (hasError) return;
+                    
+                    try {
+                        // 立即绘制这个区域到离屏画布
+                        desktopCtx.drawImage(img, region.x, region.y);
+                        regionImages[index].loaded = true;
+                        loadedRegions++;
+                        
+                        // 实时更新显示（不等待所有区域完成）
+                        scheduleRender();
+                        
+                        // 所有区域完成时的日志
+                        if (loadedRegions === regions.length) {
+                            const renderTime = performance.now() - startTime;
+                            recordRenderTime(renderTime);
+                            frameCount++;
+                            console.log(`✅ 差分更新完成: ${regions.length} 个区域，耗时: ${renderTime.toFixed(2)}ms`);
+                        }
+                        
+                    } catch (error) {
+                        console.error('差分区域绘制失败:', error);
+                        hasError = true;
+                    }
+                };
+                
+                img.onerror = function() {
+                    console.error(`❌ 差分区域加载失败:`, region);
+                    hasError = true;
+                };
+                
+                // 设置图像源
+                img.src = `data:image/jpeg;base64,${region.data}`;
+            });
+        }
+        
+        // 智能渲染调度 - 避免过度重绘
+        function scheduleRender() {
+            if (isRendering) {
+                pendingUpdate = true;
+                return;
+            }
+            
+            const now = performance.now();
+            const elapsed = now - lastRenderTime;
+            
+            if (elapsed >= FRAME_TIME) {
+                // 立即渲染
+                performRender();
+            } else {
+                // 延迟到下一个合适的时机
+                setTimeout(() => {
+                    if (pendingUpdate) {
+                        performRender();
+                    }
+                }, FRAME_TIME - elapsed);
+            }
+        }
+        
+        function performRender() {
+            if (isRendering) return;
+            
+            isRendering = true;
+            pendingUpdate = false;
+            lastRenderTime = performance.now();
+            
+            requestAnimationFrame(() => {
+                try {
+                    ctx.drawImage(desktopCanvas, 0, 0);
+                } catch (error) {
+                    console.error('渲染失败:', error);
+                } finally {
+                    isRendering = false;
+                    
+                    // 如果有待处理的更新，继续处理
+                    if (pendingUpdate) {
+                        scheduleRender();
+                    }
+                }
+            });
+        }
+        
+        // 性能监控
+        function recordRenderTime(time) {
+            renderTimes.push(time);
+            if (renderTimes.length > 100) {
+                renderTimes.shift();
+            }
+        }
+        
+        function startPerformanceMonitoring() {
+            setInterval(() => {
+                const now = Date.now();
+                const elapsed = now - lastStatsTime;
+                
+                if (elapsed >= 5000 && frameCount > 0) { // 每5秒报告一次
+                    const fps = (frameCount * 1000 / elapsed).toFixed(1);
+                    const avgRenderTime = renderTimes.length > 0 ? 
+                        (renderTimes.reduce((a, b) => a + b, 0) / renderTimes.length).toFixed(2) : 0;
+                    
+                    console.log(`📊 性能统计 [5秒]:
+🎯 渲染帧率: ${fps} FPS
+⏱️ 平均渲染时间: ${avgRenderTime}ms
+📦 总帧数: ${frameCount}`);
+                    
+                    // 重置计数器
+                    frameCount = 0;
+                    lastStatsTime = now;
+                    renderTimes.length = 0;
+                }
+            }, 1000);
         }
 
         function handleMouseClick(event) {
@@ -505,11 +654,16 @@
             // 清除输入框
             document.getElementById('clientId').value = '';
             document.getElementById('authCode').value = '';
+            
+            // 重置性能监控
+            frameCount = 0;
+            lastStatsTime = Date.now();
+            renderTimes.length = 0;
         }
 
         // 页面加载完成后的初始化
         window.addEventListener('load', function() {
-            console.log('远程桌面控制页面已加载');
+            console.log('🚀 远程桌面控制页面已加载 (性能优化版本)');
         });
     </script>
 </body>

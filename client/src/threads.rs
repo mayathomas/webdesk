@@ -17,7 +17,7 @@ pub fn screen_capture_thread(
     let mut screen_service = ScreenCaptureService::new();
     let mut active = false;
     let mut last_capture = std::time::Instant::now();
-    let capture_interval = Duration::from_millis(100); // 10 FPS
+    let capture_interval = Duration::from_millis(80); // 提高到12.5 FPS，确保达到10+ FPS实际输出
     
     loop {
         // 检查控制信号（非阻塞）
@@ -41,6 +41,7 @@ pub fn screen_capture_thread(
                     // 保存用于日志的值
                     let log_format = format.clone();
                     let log_regions_count = changed_regions.as_ref().map(|r| r.len()).unwrap_or(0);
+                    let has_data = !image_data.is_empty() || log_regions_count > 0;
                     
                     let screen_data = WebSocketMessage::ScreenData(ScreenData {
                         image_data,
@@ -56,11 +57,20 @@ pub fn screen_capture_thread(
                         break;
                     }
                     
-                    // 只在有数据时打印日志（避免无变化时的日志垃圾）
+                    // 详细日志输出
                     if full_frame {
                         println!("📷 发送完整帧: {}x{} ({})", width, height, log_format);
                     } else if log_regions_count > 0 {
                         println!("📷 发送差分数据: {} 个变化区域", log_regions_count);
+                    } else {
+                        // 每10次无变化才打印一次，避免日志垃圾
+                        static mut NO_CHANGE_COUNT: u32 = 0;
+                        unsafe {
+                            NO_CHANGE_COUNT += 1;
+                            if NO_CHANGE_COUNT % 10 == 0 {
+                                println!("📷 连续{}次无屏幕变化", NO_CHANGE_COUNT);
+                            }
+                        }
                     }
                     
                     last_capture = std::time::Instant::now();
