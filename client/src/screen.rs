@@ -5,6 +5,7 @@ use std::io::ErrorKind::WouldBlock;
 use std::thread;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangedRegion {
@@ -75,28 +76,16 @@ impl ScreenCaptureService {
         };
         let capture_time = capture_start.elapsed();
 
-        // 格式转换 - 优化的BGRA到RGBA转换
+        // 格式优化 - 直接使用BGRA格式，避免颜色通道重排
         let convert_start = std::time::Instant::now();
-        let mut rgba_data = Vec::with_capacity(buffer.len());
         
-        // 使用批处理方式，4个字节一组处理
-        let chunk_count = buffer.len() / 4;
-        rgba_data.reserve_exact(buffer.len());
-        
-        for i in 0..chunk_count {
-            let base = i * 4;
-            if base + 3 < buffer.len() {
-                rgba_data.push(buffer[base + 2]); // R (from B)
-                rgba_data.push(buffer[base + 1]); // G 
-                rgba_data.push(buffer[base + 0]); // B (from R)
-                rgba_data.push(buffer[base + 3]); // A
-            }
-        }
+        // 直接使用原始BGRA数据，无需转换
+        let bgra_data = buffer.to_vec();
         let convert_time = convert_start.elapsed();
 
         // 立即进行分辨率缩放以减少后续处理的数据量
         let scale_start = std::time::Instant::now();
-        let (width, height, rgba_data) = self.scale_frame_if_needed(original_width, original_height, rgba_data)?;
+        let (width, height, rgba_data) = self.scale_frame_if_needed(original_width, original_height, bgra_data)?;
         let scale_time = scale_start.elapsed();
 
         // 性能统计（每10帧输出一次）
@@ -150,15 +139,15 @@ impl ScreenCaptureService {
         }
     }
     
-    /// 编码为JPEG格式
-    fn encode_jpeg(&self, rgba_data: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
-        // 将RGBA转换为RGB (去除alpha通道)
-        let mut rgb_data = Vec::with_capacity(rgba_data.len() * 3 / 4);
-        for chunk in rgba_data.chunks(4) {
-            if chunk.len() >= 3 {
-                rgb_data.push(chunk[0]); // R
+    /// 编码为JPEG格式 - 优化版本，直接处理BGRA
+    fn encode_jpeg(&self, bgra_data: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+        // 将BGRA转换为RGB (去除alpha通道，同时转换颜色顺序)
+        let mut rgb_data = Vec::with_capacity(bgra_data.len() * 3 / 4);
+        for chunk in bgra_data.chunks(4) {
+            if chunk.len() >= 4 {
+                rgb_data.push(chunk[2]); // R (from B)
                 rgb_data.push(chunk[1]); // G
-                rgb_data.push(chunk[2]); // B
+                rgb_data.push(chunk[0]); // B (from R)
             }
         }
         
@@ -169,7 +158,7 @@ impl ScreenCaptureService {
         {
             use image::ImageEncoder;
             let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buffer, quality);
-            encoder.write_image(&image, width, height, image::ColorType::Rgb8)?;
+            encoder.write_image(&image, width, height, image::ExtendedColorType::Rgb8)?;
         }
         
         Ok(jpeg_buffer)
@@ -371,7 +360,7 @@ impl ScreenCaptureService {
                 &image, 
                 width as u32, 
                 height as u32, 
-                image::ColorType::Rgba8
+                image::ExtendedColorType::Rgba8
             )?;
         }
 
@@ -389,7 +378,7 @@ impl ScreenCaptureService {
         Ok((capturer.width() as u32, capturer.height() as u32))
     }
 
-    /// 根据需要缩放帧数据
+    /// 根据需要缩放帧数据 - 业界顶尖优化版本
     fn scale_frame_if_needed(&mut self, width: u32, height: u32, rgba_data: Vec<u8>) -> Result<(u32, u32, Vec<u8>)> {
         let (target_width, target_height) = Self::calculate_target_resolution(width, height);
         
@@ -403,19 +392,61 @@ impl ScreenCaptureService {
             println!("📏 自动缩放帧: {}x{} -> {}x{} (减少 {:.1}% 像素)", 
                 width, height, target_width, target_height,
                 (1.0 - (target_width * target_height) as f64 / (width * height) as f64) * 100.0);
+            println!("🚀 使用业界顶尖的并行批处理算法");
         }
         
-        // 创建RGBA图像
-        let image = image::RgbaImage::from_raw(width, height, rgba_data)
-            .ok_or_else(|| anyhow::anyhow!("创建RGBA图像失败"))?;
+        // 计算缩放参数
+        let x_step = width / target_width;
+        let y_step = height / target_height;
+        let target_size = (target_width * target_height * 4) as usize;
         
-        // 使用最快的Nearest滤波器，虽然质量较低但速度最快
-        // 对于屏幕共享，速度比质量更重要
-        let resized = image::imageops::resize(&image, target_width, target_height, image::imageops::FilterType::Nearest);
+        // 使用Rayon并行处理，每个核心处理不同的行
+        let rgba_data_ref = &rgba_data;
         
-        // 转换回Vec<u8>
-        let resized_data = resized.into_raw();
+        // 业界最佳实践：将工作分块到多个CPU核心
+        let num_cores = num_cpus::get() as u32;
+        let rows_per_chunk = (target_height / num_cores).max(1);
+        let chunks: Vec<_> = (0..target_height)
+            .step_by(rows_per_chunk as usize)
+            .map(|start_y| {
+                let end_y = (start_y + rows_per_chunk).min(target_height);
+                (start_y, end_y)
+            })
+            .collect();
+        
+        // 将数据分割成独立的块来避免共享可变状态
+        let mut output_chunks: Vec<Vec<u8>> = chunks.into_par_iter().map(|(start_y, end_y)| {
+            let mut chunk_data = vec![0u8; (end_y - start_y) as usize * target_width as usize * 4];
+            
+            for y in start_y..end_y {
+                let src_y = (y * y_step).min(height - 1);
+                let src_row_offset = (src_y as usize) * (width * 4) as usize;
+                let dst_row_start = ((y - start_y) * target_width * 4) as usize;
+                
+                // 安全的行处理 - 避免unsafe指针操作
+                for x in 0..target_width {
+                    let src_x = (x * x_step).min(width - 1);
+                    let src_idx = src_row_offset + (src_x as usize * 4);
+                    let dst_idx = dst_row_start + (x as usize * 4);
+                    
+                    // 使用安全的边界检查复制
+                    if src_idx + 3 < rgba_data_ref.len() && dst_idx + 3 < chunk_data.len() {
+                        chunk_data[dst_idx] = rgba_data_ref[src_idx];
+                        chunk_data[dst_idx + 1] = rgba_data_ref[src_idx + 1];
+                        chunk_data[dst_idx + 2] = rgba_data_ref[src_idx + 2];
+                        chunk_data[dst_idx + 3] = rgba_data_ref[src_idx + 3];
+                    }
+                }
+            }
+            chunk_data
+        }).collect();
+        
+        // 合并所有块
+        let mut resized_data = Vec::with_capacity(target_size);
+        for chunk in output_chunks.drain(..) {
+            resized_data.extend(chunk);
+        }
         
         Ok((target_width, target_height, resized_data))
     }
-} 
+}
