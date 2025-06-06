@@ -23,7 +23,7 @@ let pendingUpdate = false;
 let lastRenderTime = 0;
 const FRAME_TIME = 16.67; // 60fps = 16.67ms per frame
 
-// WebRTC配置 - 增强版本，支持更复杂的网络环境
+// WebRTC配置 - 使用可靠的STUN服务器
 const rtcConfiguration = {
     iceServers: [
         // Google STUN服务器
@@ -33,24 +33,7 @@ const rtcConfiguration = {
         
         // 其他公共STUN服务器
         { urls: 'stun:stun.stunprotocol.org:3478' },
-        { urls: 'stun:stun.voiparound.com' },
-        
-        // 免费TURN服务器（有时间和流量限制）
-        {
-            urls: 'turn:numb.viagenie.ca',
-            credential: 'muazkh',
-            username: 'webrtc@live.com'
-        },
-        {
-            urls: 'turn:192.158.29.39:3478?transport=udp',
-            credential: 'JZEOEt2V3Qb0y27GRntt2u2PAYA=',
-            username: '28224511:1379330808'
-        },
-        {
-            urls: 'turn:192.158.29.39:3478?transport=tcp',
-            credential: 'JZEOEt2V3Qb0y27GRntt2u2PAYA=',
-            username: '28224511:1379330808'
-        }
+        { urls: 'stun:stun.voiparound.com' }
     ],
     iceCandidatePoolSize: 10,  // 增加候选池大小
     bundlePolicy: 'max-bundle',

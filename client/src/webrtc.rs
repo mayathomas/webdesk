@@ -51,7 +51,7 @@ impl WebRTCClient {
             .with_interceptor_registry(registry)
             .build();
         
-        // 创建ICE服务器配置 - 增强版本，支持更复杂的网络环境
+        // 创建ICE服务器配置 - 只使用可靠的STUN服务器
         let config = RTCConfiguration {
             ice_servers: vec![
                 // Google STUN服务器
@@ -71,27 +71,11 @@ impl WebRTCClient {
                     ],
                     ..Default::default()
                 },
-                // 免费TURN服务器
-                RTCIceServer {
-                    urls: vec!["turn:numb.viagenie.ca".to_owned()],
-                    username: "webrtc@live.com".to_owned(),
-                    credential: "muazkh".to_owned(),
-                    ..Default::default()
-                },
-                RTCIceServer {
-                    urls: vec![
-                        "turn:192.158.29.39:3478?transport=udp".to_owned(),
-                        "turn:192.158.29.39:3478?transport=tcp".to_owned(),
-                    ],
-                    username: "28224511:1379330808".to_owned(),
-                    credential: "JZEOEt2V3Qb0y27GRntt2u2PAYA=".to_owned(),
-                    ..Default::default()
-                },
             ],
             ..Default::default()
         };
         
-        println!("📋 ICE服务器配置完成: {} 个服务器", config.ice_servers.len());
+        println!("📋 ICE服务器配置完成: {} 个STUN服务器", config.ice_servers.len());
         
         // 创建PeerConnection
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
