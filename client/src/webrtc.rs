@@ -70,11 +70,11 @@ impl WebRTCClient {
                 credential: "".to_owned(),
                 credential_type: RTCIceCredentialType::Unspecified,
             },
-            // 公共TURN服务器（用于NAT穿透失败时的中继）
+            // 我们自己的TURN服务器（优先使用）
             RTCIceServer {
-                urls: vec!["turn:openrelay.metered.ca:80".to_owned()],
-                username: "openrelayproject".to_owned(),
-                credential: "openrelayproject".to_owned(),
+                urls: vec!["turn:127.0.0.1:3478".to_owned()],
+                username: "maya".to_owned(),
+                credential: "sorrow2713".to_owned(),
                 credential_type: RTCIceCredentialType::Password,
             },
         ];

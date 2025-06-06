@@ -30,12 +30,12 @@ const rtcConfiguration = {
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun.cloudflare.com:3478' },
         
-        // 公共TURN服务器（用于NAT穿透失败时的中继）
+        // 我们自己的TURN服务器（优先使用）
         { 
-            urls: 'turn:openrelay.metered.ca:80',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-        }
+            urls: 'turn:127.0.0.1:3478',
+            username: 'maya',
+            credential: 'sorrow2713'
+        },
     ],
     iceCandidatePoolSize: 10,  // 增加候选池大小
     bundlePolicy: 'max-bundle',

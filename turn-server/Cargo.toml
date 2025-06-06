@@ -1,0 +1,19 @@
+[package]
+name = "turn-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# WebRTC生态系统的turn库
+turn = "0.10"
+webrtc-util = "0.11"
+
+# 异步运行时
+tokio = { version = "1.0", features = ["full"] }
+
+# 命令行解析
+clap = { version = "4.0", features = ["derive"] }
+
+# 日志
+log = "0.4"
+env_logger = "0.10"
