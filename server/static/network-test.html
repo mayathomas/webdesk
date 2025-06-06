@@ -81,23 +81,33 @@
     </div>
 
     <script>
-        // 使用相同的ICE服务器配置
-        const rtcConfiguration = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun.stunprotocol.org:3478' },
-                { urls: 'stun:stun.voiparound.com' },
-                // 我们自己的TURN服务器（优先测试）
-                {
-                    urls: 'turn:127.0.0.1:3478',
-                    username: 'maya',
-                    credential: 'sorrow2713'
-                },
-            ],
-            iceCandidatePoolSize: 10
-        };
+        // WebRTC配置 - 将从API动态加载
+        let rtcConfiguration = null;
+
+        // 加载WebRTC配置
+        async function loadWebRTCConfig() {
+            try {
+                const response = await fetch('/api/webrtc-config');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                rtcConfiguration = await response.json();
+                console.log('📋 已从服务器加载WebRTC配置:', rtcConfiguration);
+                return rtcConfiguration;
+            } catch (error) {
+                console.error('❌ 加载WebRTC配置失败:', error);
+                // 使用默认配置作为备份
+                rtcConfiguration = {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun.cloudflare.com:3478' }
+                    ],
+                    iceCandidatePoolSize: 10
+                };
+                console.log('💡 使用默认WebRTC配置');
+                return rtcConfiguration;
+            }
+        }
 
         function log(elementId, message) {
             const element = document.getElementById(elementId);
@@ -115,8 +125,13 @@
             const button = event.target;
             button.disabled = true;
             
-            setStatus('iceStatus', '正在测试ICE服务器...', 'info');
+            setStatus('iceStatus', '正在加载配置...', 'info');
             document.getElementById('iceLog').innerHTML = '';
+
+            // 加载配置
+            await loadWebRTCConfig();
+            
+            setStatus('iceStatus', '正在测试ICE服务器...', 'info');
 
             const pc = new RTCPeerConnection(rtcConfiguration);
             const candidateTypes = new Set();
@@ -160,8 +175,13 @@
             const button = event.target;
             button.disabled = true;
             
-            setStatus('selfStatus', '正在测试自连接...', 'info');
+            setStatus('selfStatus', '正在加载配置...', 'info');
             document.getElementById('selfLog').innerHTML = '';
+
+            // 加载配置
+            await loadWebRTCConfig();
+            
+            setStatus('selfStatus', '正在测试自连接...', 'info');
 
             const pc1 = new RTCPeerConnection(rtcConfiguration);
             const pc2 = new RTCPeerConnection(rtcConfiguration);

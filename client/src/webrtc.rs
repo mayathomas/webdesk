@@ -54,30 +54,31 @@ impl WebRTCClient {
             .with_interceptor_registry(registry)
             .build();
         
-        // ICE服务器配置：包含STUN和TURN服务器
-        let ice_servers = vec![
-            // Google公共STUN服务器
-            RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                username: "".to_owned(),
-                credential: "".to_owned(),
-                credential_type: RTCIceCredentialType::Unspecified,
-            },
-            // Cloudflare公共STUN服务器  
-            RTCIceServer {
-                urls: vec!["stun:stun.cloudflare.com:3478".to_owned()],
-                username: "".to_owned(),
-                credential: "".to_owned(),
-                credential_type: RTCIceCredentialType::Unspecified,
-            },
-            // 我们自己的TURN服务器（优先使用）
-            RTCIceServer {
-                urls: vec!["turn:127.0.0.1:3478".to_owned()],
-                username: "maya".to_owned(),
-                credential: "sorrow2713".to_owned(),
-                credential_type: RTCIceCredentialType::Password,
-            },
-        ];
+        // 从YAML配置文件加载ICE服务器配置
+        let ice_servers = match crate::config::WebRtcConfig::load_from_file("webrtc-config.yaml") {
+            Ok(config) => {
+                println!("📋 已加载WebRTC配置文件");
+                config.to_ice_servers()
+            }
+            Err(e) => {
+                println!("⚠️ 加载WebRTC配置失败，使用默认配置: {}", e);
+                // 使用默认配置作为备份
+                vec![
+                    RTCIceServer {
+                        urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                        username: "".to_owned(),
+                        credential: "".to_owned(),
+                        credential_type: RTCIceCredentialType::Unspecified,
+                    },
+                    RTCIceServer {
+                        urls: vec!["stun:stun.cloudflare.com:3478".to_owned()],
+                        username: "".to_owned(),
+                        credential: "".to_owned(),
+                        credential_type: RTCIceCredentialType::Unspecified,
+                    },
+                ]
+            }
+        };
         
         println!("📋 ICE服务器配置完成: {} 个STUN服务器", ice_servers.len());
         

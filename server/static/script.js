@@ -3,6 +3,9 @@ let peerConnection = null;
 let dataChannel = null;
 let signalingSocket = null;
 let currentClientId = null; // 添加全局变量保存当前客户端ID
+let screenCanvas = null;
+let canvasContext = null;
+let isConnected = false;
 
 // 分片重组相关变量
 let chunkBuffers = new Map(); // 存储分片数据的Map: messageId -> {chunks: [], totalChunks: number, totalSize: number}
@@ -10,11 +13,9 @@ let chunkBuffers = new Map(); // 存储分片数据的Map: messageId -> {chunks:
 // 画布相关变量
 let canvas = null;
 let ctx = null;
-let isConnected = false;
 let desktopCanvas = null;
 let desktopCtx = null;
 
-// 性能监控变量
 let frameCount = 0;
 let lastStatsTime = Date.now();
 let renderTimes = [];
@@ -22,25 +23,48 @@ let isRendering = false;
 let pendingUpdate = false;
 let lastRenderTime = 0;
 const FRAME_TIME = 16.67; // 60fps = 16.67ms per frame
-
-// WebRTC配置 - 包含STUN和TURN服务器
-const rtcConfiguration = {
-    iceServers: [
-        // Google公共STUN服务器
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' },
-        
-        // 我们自己的TURN服务器（优先使用）
-        { 
-            urls: 'turn:127.0.0.1:3478',
-            username: 'maya',
-            credential: 'sorrow2713'
-        },
-    ],
-    iceCandidatePoolSize: 10,  // 增加候选池大小
-    bundlePolicy: 'max-bundle',
-    rtcpMuxPolicy: 'require'
+// 性能监控变量
+let performanceData = {
+    frameCount: 0,
+    totalBytes: 0,
+    startTime: Date.now(),
+    renderTimes: []
 };
+
+// 分片消息处理
+let messageChunks = new Map();
+let expectedChunks = 0;
+let receivedChunks = 0;
+
+// WebRTC配置 - 将从API动态加载
+let rtcConfiguration = null;
+
+// 加载WebRTC配置
+async function loadWebRTCConfig() {
+    try {
+        const response = await fetch('/api/webrtc-config');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        rtcConfiguration = await response.json();
+        console.log('📋 已从服务器加载WebRTC配置:', rtcConfiguration);
+        return rtcConfiguration;
+    } catch (error) {
+        console.error('❌ 加载WebRTC配置失败:', error);
+        // 使用默认配置作为备份
+        rtcConfiguration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun.cloudflare.com:3478' }
+            ],
+            iceCandidatePoolSize: 10,
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require'
+        };
+        console.log('💡 使用默认WebRTC配置');
+        return rtcConfiguration;
+    }
+}
 
 function showStatus(message, type = 'success') {
     const status = document.getElementById('status');
@@ -72,17 +96,20 @@ async function connect() {
     // 保存当前客户端ID
     currentClientId = clientId;
 
-    showStatus('正在连接信令服务器...', 'info');
+    showStatus('正在加载配置...', 'info');
     document.getElementById('connectionInfo').style.display = 'block';
 
     try {
-        // 1. 连接信令服务器
+        // 1. 加载WebRTC配置
+        await loadWebRTCConfig();
+        
+        // 2. 连接信令服务器
         await connectSignalingServer(clientId, authCode);
         
-        // 2. 初始化WebRTC
+        // 3. 初始化WebRTC
         await initWebRTC();
         
-        // 3. 创建Offer
+        // 4. 创建Offer
         await createOffer(clientId);
         
     } catch (error) {
@@ -420,7 +447,7 @@ function updateFullFrameAsync(screenData, startTime) {
                 
                 const renderTime = performance.now() - startTime;
                 recordRenderTime(renderTime);
-                frameCount++;
+                performanceData.frameCount++;
                 
                 console.log(`✅ 完整帧完成，耗时: ${renderTime.toFixed(2)}ms`);
                 resolve();
@@ -476,7 +503,7 @@ function updateDifferentialFrameAsync(screenData, startTime) {
             
             const renderTime = performance.now() - startTime;
             recordRenderTime(renderTime);
-            frameCount++;
+            performanceData.frameCount++;
             
             console.log(`✅ 差分更新完成: ${successCount}/${regions.length} 区域，耗时: ${renderTime.toFixed(2)}ms`);
             
@@ -563,31 +590,31 @@ function performRender() {
 
 // 性能监控
 function recordRenderTime(time) {
-    renderTimes.push(time);
-    if (renderTimes.length > 100) {
-        renderTimes.shift();
+    performanceData.renderTimes.push(time);
+    if (performanceData.renderTimes.length > 100) {
+        performanceData.renderTimes.shift();
     }
 }
 
 function startPerformanceMonitoring() {
     setInterval(() => {
         const now = Date.now();
-        const elapsed = now - lastStatsTime;
+        const elapsed = now - performanceData.startTime;
         
-        if (elapsed >= 5000 && frameCount > 0) {
-            const fps = (frameCount * 1000 / elapsed).toFixed(1);
-            const avgRenderTime = renderTimes.length > 0 ? 
-                (renderTimes.reduce((a, b) => a + b, 0) / renderTimes.length).toFixed(2) : 0;
+        if (elapsed >= 5000 && performanceData.frameCount > 0) {
+            const fps = (performanceData.frameCount * 1000 / elapsed).toFixed(1);
+            const avgRenderTime = performanceData.renderTimes.length > 0 ? 
+                (performanceData.renderTimes.reduce((a, b) => a + b, 0) / performanceData.renderTimes.length).toFixed(2) : 0;
             
             console.log(`📊 WebRTC性能统计 [${elapsed/1000}秒]:
 🎯 渲染帧率: ${fps} FPS
 ⏱️ 平均渲染时间: ${avgRenderTime}ms  
-📦 总帧数: ${frameCount}`);
+📦 总帧数: ${performanceData.frameCount}`);
             
             // 重置计数器
-            frameCount = 0;
-            lastStatsTime = now;
-            renderTimes.length = 0;
+            performanceData.frameCount = 0;
+            performanceData.startTime = now;
+            performanceData.renderTimes.length = 0;
         }
     }, 1000);
 }
@@ -701,9 +728,9 @@ function resetUI() {
     updateConnectionInfo('dataChannelState', '未连接');
     
     // 重置性能监控
-    frameCount = 0;
-    lastStatsTime = Date.now();
-    renderTimes.length = 0;
+    performanceData.frameCount = 0;
+    performanceData.startTime = Date.now();
+    performanceData.renderTimes.length = 0;
     
     // 清理WebRTC对象
     peerConnection = null;

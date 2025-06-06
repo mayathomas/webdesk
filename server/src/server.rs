@@ -1,4 +1,5 @@
 use crate::types::*;
+use crate::config::WebRtcConfig;
 use anyhow::Result;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
@@ -45,6 +46,31 @@ pub async fn start_server(addr: SocketAddr) -> Result<()> {
             ws.on_upgrade(move |socket| handle_websocket(socket, state))
         });
     
+    // WebRTC配置API路由
+    let webrtc_config = warp::path("api")
+        .and(warp::path("webrtc-config"))
+        .and(warp::get())
+        .map(|| {
+            match WebRtcConfig::load_from_file("webrtc-config.yaml") {
+                Ok(config) => {
+                    warp::reply::with_status(
+                        warp::reply::json(&config.to_frontend_format()),
+                        warp::http::StatusCode::OK
+                    )
+                }
+                Err(e) => {
+                    println!("❌ 加载WebRTC配置失败: {}", e);
+                    let error = serde_json::json!({
+                        "error": format!("Failed to load config: {}", e)
+                    });
+                    warp::reply::with_status(
+                        warp::reply::json(&error),
+                        warp::http::StatusCode::INTERNAL_SERVER_ERROR
+                    )
+                }
+            }
+        });
+    
     // 静态文件路由 - 直接提供静态文件
     let static_files = warp::fs::dir("static");
     
@@ -53,8 +79,8 @@ pub async fn start_server(addr: SocketAddr) -> Result<()> {
         warp::redirect::found(warp::http::Uri::from_static("/index.html"))
     });
     
-    // 合并所有路由 - 注意顺序：WebSocket优先，然后首页，最后静态文件
-    let routes = websocket.or(index).or(static_files);
+    // 合并所有路由 - 注意顺序：WebSocket优先，API，然后首页，最后静态文件
+    let routes = websocket.or(webrtc_config).or(index).or(static_files);
     
     println!("🌐 HTTP和WebSocket服务器正在监听: {}", addr);
     println!("   - 网页界面: http://{}", addr);

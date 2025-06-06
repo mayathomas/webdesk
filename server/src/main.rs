@@ -1,5 +1,6 @@
 mod types;
 mod server;
+mod config;
 
 use anyhow::Result;
 use std::net::SocketAddr;
