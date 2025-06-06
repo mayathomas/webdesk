@@ -201,7 +201,8 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             }
                             
                             WebSocketMessage::WebRTCIceCandidate { target_id, ice_candidate } => {
-                                println!("🧊 转发ICE候选，target_id: {}", target_id);
+                                let candidate_string = ice_candidate.candidate.clone();
+                                println!("🧊 转发ICE候选，target_id: {}, 候选: {}", target_id, candidate_string);
                                 
                                 // 判断发送方和接收方
                                 if target_id == "browser" {
@@ -210,14 +211,14 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                         if let Some(browser_tx) = state.browser_connections.get(current_client_id) {
                                             let msg = WebSocketMessage::WebRTCIceCandidate { 
                                                 target_id: current_client_id.clone(), 
-                                                ice_candidate 
+                                                ice_candidate
                                             };
                                             if let Ok(json) = serde_json::to_string(&msg) {
                                                 let _ = browser_tx.send(Message::text(json));
-                                                println!("✅ ICE候选已转发到浏览器: {}", current_client_id);
+                                                println!("✅ ICE候选已转发到浏览器: {}, 候选: {}", current_client_id, candidate_string);
                                             }
                                         } else {
-                                            println!("⚠️ 未找到对应的浏览器连接: {}", current_client_id);
+                                            println!("⚠️ 未找到对应的浏览器连接: {}, 候选: {}", current_client_id, candidate_string);
                                         }
                                     }
                                 } else {
@@ -229,10 +230,10 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                         };
                                         if let Ok(json) = serde_json::to_string(&msg) {
                                             let _ = client_tx.send(Message::text(json));
-                                            println!("✅ ICE候选已转发到客户端: {}", target_id);
+                                            println!("✅ ICE候选已转发到客户端: {}, 候选: {}", target_id, candidate_string);
                                         }
                                     } else {
-                                        println!("⚠️ 未找到对应的客户端连接: {}", target_id);
+                                        println!("⚠️ 未找到对应的客户端连接: {}, 候选: {}", target_id, candidate_string);
                                     }
                                 }
                             }

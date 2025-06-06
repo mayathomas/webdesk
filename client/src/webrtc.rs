@@ -8,6 +8,7 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -25,6 +26,7 @@ pub struct WebRTCClient {
     pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaling_tx: mpsc::UnboundedSender<WebSocketMessage>,
     pub client_id: String,
+    pub data_channel_ready_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl WebRTCClient {
@@ -32,6 +34,7 @@ impl WebRTCClient {
     pub async fn new(
         client_id: String,
         signaling_tx: mpsc::UnboundedSender<WebSocketMessage>,
+        data_channel_ready_tx: Option<mpsc::UnboundedSender<()>>,
     ) -> Result<Self> {
         println!("🌐 初始化WebRTC客户端...");
         
@@ -51,34 +54,38 @@ impl WebRTCClient {
             .with_interceptor_registry(registry)
             .build();
         
-        // 创建ICE服务器配置 - 只使用可靠的STUN服务器
-        let config = RTCConfiguration {
-            ice_servers: vec![
-                // Google STUN服务器
-                RTCIceServer {
-                    urls: vec![
-                        "stun:stun.l.google.com:19302".to_owned(),
-                        "stun:stun1.l.google.com:19302".to_owned(),
-                        "stun:stun2.l.google.com:19302".to_owned(),
-                    ],
-                    ..Default::default()
-                },
-                // 其他公共STUN服务器
-                RTCIceServer {
-                    urls: vec![
-                        "stun:stun.stunprotocol.org:3478".to_owned(),
-                        "stun:stun.voiparound.com".to_owned(),
-                    ],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        // ICE服务器配置：包含STUN和TURN服务器
+        let ice_servers = vec![
+            // Google公共STUN服务器
+            RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                username: "".to_owned(),
+                credential: "".to_owned(),
+                credential_type: RTCIceCredentialType::Unspecified,
+            },
+            // Cloudflare公共STUN服务器  
+            RTCIceServer {
+                urls: vec!["stun:stun.cloudflare.com:3478".to_owned()],
+                username: "".to_owned(),
+                credential: "".to_owned(),
+                credential_type: RTCIceCredentialType::Unspecified,
+            },
+            // 公共TURN服务器（用于NAT穿透失败时的中继）
+            RTCIceServer {
+                urls: vec!["turn:openrelay.metered.ca:80".to_owned()],
+                username: "openrelayproject".to_owned(),
+                credential: "openrelayproject".to_owned(),
+                credential_type: RTCIceCredentialType::Password,
+            },
+        ];
         
-        println!("📋 ICE服务器配置完成: {} 个STUN服务器", config.ice_servers.len());
+        println!("📋 ICE服务器配置完成: {} 个STUN服务器", ice_servers.len());
         
         // 创建PeerConnection
-        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let peer_connection = Arc::new(api.new_peer_connection(RTCConfiguration {
+            ice_servers,
+            ..Default::default()
+        }).await?);
         
         println!("✅ WebRTC PeerConnection 已创建");
         
@@ -87,6 +94,7 @@ impl WebRTCClient {
             data_channel: Arc::new(Mutex::new(None)),
             signaling_tx,
             client_id,
+            data_channel_ready_tx,
         })
     }
     
@@ -100,7 +108,7 @@ impl WebRTCClient {
             println!("🔗 WebRTC连接状态变化: {:?}", state);
             match state {
                 RTCPeerConnectionState::Connected => {
-                    println!("✅ WebRTC P2P连接已建立！");
+                    println!("🎉 WebRTC P2P连接已建立！数据通道应该可用了！");
                 }
                 RTCPeerConnectionState::Connecting => {
                     println!("🔄 WebRTC正在连接...");
@@ -114,7 +122,9 @@ impl WebRTCClient {
                 RTCPeerConnectionState::Closed => {
                     println!("🔐 WebRTC连接已关闭");
                 }
-                _ => {}
+                _ => {
+                    println!("🔍 WebRTC连接状态: {:?}", state);
+                }
             }
             Box::pin(async {})
         }));
@@ -122,6 +132,30 @@ impl WebRTCClient {
         // 监听ICE连接状态变化
         self.peer_connection.on_ice_connection_state_change(Box::new(move |state| {
             println!("🧊 ICE连接状态变化: {:?}", state);
+            match state {
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected => {
+                    println!("🎉 ICE连接已建立！P2P通道打开！");
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Completed => {
+                    println!("✅ ICE连接完成！最佳路径已选择！");
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Failed => {
+                    println!("❌ ICE连接失败！P2P无法建立！");
+                    println!("💡 可能原因：");
+                    println!("   1. 严格的NAT/防火墙阻止P2P连接");
+                    println!("   2. 需要TURN服务器中继");
+                    println!("   3. 网络策略限制");
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Disconnected => {
+                    println!("⚠️ ICE连接断开");
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Checking => {
+                    println!("🔍 ICE正在检查连通性...");
+                }
+                _ => {
+                    println!("🔍 ICE连接状态: {:?}", state);
+                }
+            }
             Box::pin(async {})
         }));
         
@@ -167,21 +201,50 @@ impl WebRTCClient {
             })
         }));
         
-        // 监听数据通道（浏览器端创建的数据通道）
+                // 监听数据通道（浏览器端创建的数据通道）
         let data_channel_ref = self.data_channel.clone();
+        let ready_tx_clone = self.data_channel_ready_tx.clone();
+        
         self.peer_connection.on_data_channel(Box::new(move |data_channel| {
             let data_channel = Arc::clone(&data_channel);
-            println!("📡 收到来自浏览器的数据通道: {}", data_channel.label());
+            println!("🎉 收到来自浏览器的数据通道: {} (状态: {:?})", 
+                data_channel.label(), data_channel.ready_state());
             
             // 保存数据通道引用
             if let Ok(mut dc_ref) = data_channel_ref.lock() {
                 *dc_ref = Some(Arc::clone(&data_channel));
-                println!("✅ 数据通道引用已保存");
+                println!("✅ 数据通道引用已保存到客户端");
+            } else {
+                println!("❌ 无法保存数据通道引用");
             }
             
             // 设置数据通道监听器
+            let dc_clone_for_open = Arc::clone(&data_channel);
+            let ready_tx = ready_tx_clone.clone();
             data_channel.on_open(Box::new(move || {
-                println!("✅ 数据通道已打开，可以开始数据传输");
+                println!("🚀 数据通道已打开，可以开始双向数据传输！状态: {:?}", 
+                    dc_clone_for_open.ready_state());
+                println!("🎉 现在可以开始屏幕捕获和传输了！");
+                
+                // 通知主线程数据通道已就绪
+                if let Some(ref tx) = ready_tx {
+                    let _ = tx.send(());
+                }
+                
+                Box::pin(async {})
+            }));
+            
+            let dc_clone_for_close = Arc::clone(&data_channel);
+            data_channel.on_close(Box::new(move || {
+                println!("🔒 数据通道已关闭，状态: {:?}", 
+                    dc_clone_for_close.ready_state());
+                Box::pin(async {})
+            }));
+            
+            let dc_clone_for_error = Arc::clone(&data_channel);
+            data_channel.on_error(Box::new(move |err| {
+                println!("❌ 数据通道错误: {:?}, 状态: {:?}", 
+                    err, dc_clone_for_error.ready_state());
                 Box::pin(async {})
             }));
             
@@ -189,12 +252,15 @@ impl WebRTCClient {
             data_channel.on_message(Box::new(move |msg| {
                 let dc = Arc::clone(&dc_clone);
                 Box::pin(async move {
+                    println!("📨 收到浏览器数据: {} bytes", msg.data.len());
                     handle_data_channel_message(dc, msg).await;
                 })
             }));
             
             Box::pin(async {})
         }));
+        
+        println!("✅ 数据通道监听器已设置");
         
         Ok(())
     }
@@ -250,8 +316,7 @@ impl WebRTCClient {
             if let Ok(data_channel_guard) = self.data_channel.lock() {
                 data_channel_guard.clone()
             } else {
-                println!("⚠️ 无法获取数据通道锁");
-                return Ok(());
+                return Ok(()); // 静默返回，避免日志spam
             }
         };
         
@@ -389,10 +454,12 @@ impl WebRTCClient {
                     println!("✅ 分片发送完成: {} 个分片，总大小: {} bytes", total_chunks, total_size);
                 }
             } else {
-                println!("⚠️ 数据通道未就绪，状态: {:?}", data_channel.ready_state());
+                // 数据通道存在但未就绪，静默返回
+                return Ok(());
             }
         } else {
-            println!("⚠️ 数据通道未初始化");
+            // 数据通道未初始化，静默返回  
+            return Ok(());
         }
         Ok(())
     }
@@ -435,29 +502,108 @@ fn parse_and_format_candidate(candidate_str: &str) -> String {
         let candidate_type = parts[1]; // host/srflx/relay等
         let address_port = parts[2]; // IP:PORT格式
         
-        // 分离IP地址和端口
-        if let Some(colon_pos) = address_port.rfind(':') {
-            let ip = &address_port[..colon_pos];
-            let port = &address_port[colon_pos + 1..];
+        // 解析地址:端口，处理IPv6和webrtc-rs的bug格式
+        let (ip, port) = parse_address_port(address_port);
+        
+        // 如果解析失败（返回空字符串），跳过该候选
+        if ip.is_empty() || port.is_empty() {
+            println!("⚠️ 跳过无效的ICE候选: {}", candidate_str);
+            return String::new(); // 返回空字符串，让上层跳过
+        }
+        
+        // 验证端口是否有效
+        if let Ok(port_num) = port.parse::<u16>() {
+            // 根据候选类型设置优先级
+            let priority = match candidate_type {
+                "host" => 2113937151,
+                "srflx" => 1677729535, 
+                "relay" => 16777215,
+                _ => 1000000,
+            };
             
             // 构造标准的SDP候选格式
-            // candidate:<foundation> <component-id> <transport> <priority> <ip> <port> typ <type>
+            // 根据RFC 5245和MDN文档，ICE候选的IP地址字段不使用方括号
             format!(
                 "candidate:{} {} {} {} {} {} typ {}",
-                "foundation", // 基础标识符，可以是任意值
-                1,           // component-id，1表示RTP
+                "foundation", // 基础标识符
+                1,           // component-id
                 transport,   // UDP/TCP
-                2113667326,  // 优先级，host类型的默认优先级
-                ip,          // IP地址
-                port,        // 端口
+                priority,    // 根据类型设置的优先级
+                ip,          // IP地址（IPv6无需方括号）
+                port_num,    // 端口号
                 candidate_type // host/srflx/relay
             )
         } else {
-            // 如果解析失败，返回带candidate:前缀的原字符串
-            format!("candidate:{}", candidate_str)
+            println!("⚠️ 无效的端口号: {}, 跳过候选", port);
+            String::new() // 返回空字符串，让上层跳过
         }
     } else {
-        // 如果格式不符合预期，返回带candidate:前缀的原字符串
+        println!("⚠️ 候选格式不正确: {}, 跳过", candidate_str);
         format!("candidate:{}", candidate_str)
     }
+}
+
+/// 解析地址:端口字符串，处理各种格式，包括webrtc-rs的bug格式
+fn parse_address_port(address_port: &str) -> (String, String) {
+    println!("🔍 解析地址:端口: {}", address_port);
+    
+    // 处理webrtc-rs的IPv4 bug: "121.227.207.147:502480.0.0.0"
+    // 正确端口应该是50248，不是502480.0.0.0
+    if address_port.contains("0.0.0.0") {
+        if let Some(zero_pos) = address_port.find("0.0.0.0") {
+            let before_zero = &address_port[..zero_pos];
+            if let Some(colon_pos) = before_zero.rfind(':') {
+                let ip = &before_zero[..colon_pos];
+                let port_with_extra = &before_zero[colon_pos + 1..];
+                
+                // 从port_with_extra中提取正确的端口号
+                // 比如从"50248"中提取50248，这里需要找到正确的端口长度
+                if port_with_extra.len() >= 5 {
+                    let port = &port_with_extra[..5]; // 大多数端口是5位或更少
+                    if port.chars().all(|c| c.is_ascii_digit()) {
+                        println!("🔨 修复webrtc-rs IPv4 bug: {} -> {}:{}", address_port, ip, port);
+                        return (ip.to_string(), port.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    // 处理webrtc-rs的IPv6 bug: "240e:3a3:4c35:c9a0:b01f:76db:88b8:7e1f:50254::"
+    // 这种格式中最后的数字部分应该是端口
+    if address_port.ends_with("::") && address_port.contains(':') {
+        let without_double_colon = &address_port[..address_port.len() - 2];
+        if let Some(last_colon_pos) = without_double_colon.rfind(':') {
+            let potential_port = &without_double_colon[last_colon_pos + 1..];
+            if potential_port.chars().all(|c| c.is_ascii_digit()) && potential_port.len() <= 5 {
+                let ip_part = &without_double_colon[..last_colon_pos];
+                println!("🔨 修复webrtc-rs IPv6 bug: {} -> IPv6 {}:{}", address_port, ip_part, potential_port);
+                return (ip_part.to_string(), potential_port.to_string()); // 不加方括号，让webrtc-rs库自己处理
+            }
+        }
+    }
+    
+    // 处理标准IPv6格式 [ip]:port
+    if address_port.starts_with('[') {
+        if let Some(bracket_pos) = address_port.find("]:") {
+            let ip = address_port[1..bracket_pos].to_string();
+            let port = address_port[bracket_pos + 2..].to_string();
+            return (ip, port); // IPv6地址不需要方括号给webrtc-rs
+        }
+    }
+    
+    // 处理标准IPv4格式 ip:port
+    if let Some(colon_pos) = address_port.rfind(':') {
+        let potential_ip = &address_port[..colon_pos];
+        let potential_port = &address_port[colon_pos + 1..];
+        
+        // 检查端口部分是否为纯数字且不为空
+        if potential_port.chars().all(|c| c.is_ascii_digit()) && !potential_port.is_empty() {
+            return (potential_ip.to_string(), potential_port.to_string());
+        }
+    }
+    
+    // 如果所有解析都失败，返回空字符串让上层跳过
+    println!("⚠️ 无法解析地址:端口 {}, 跳过该候选", address_port);
+    ("".to_string(), "".to_string()) // 返回空字符串，让上层跳过
 } 

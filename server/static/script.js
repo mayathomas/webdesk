@@ -23,17 +23,19 @@ let pendingUpdate = false;
 let lastRenderTime = 0;
 const FRAME_TIME = 16.67; // 60fps = 16.67ms per frame
 
-// WebRTC配置 - 使用可靠的STUN服务器
+// WebRTC配置 - 包含STUN和TURN服务器
 const rtcConfiguration = {
     iceServers: [
-        // Google STUN服务器
+        // Google公共STUN服务器
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
         
-        // 其他公共STUN服务器
-        { urls: 'stun:stun.stunprotocol.org:3478' },
-        { urls: 'stun:stun.voiparound.com' }
+        // 公共TURN服务器（用于NAT穿透失败时的中继）
+        { 
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+        }
     ],
     iceCandidatePoolSize: 10,  // 增加候选池大小
     bundlePolicy: 'max-bundle',

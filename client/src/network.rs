@@ -119,6 +119,9 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
     // 创建信令通道
     let (signaling_tx, mut signaling_rx) = tokio::sync::mpsc::unbounded_channel::<WebSocketMessage>();
     
+    // 数据通道就绪通知通道
+    let (data_channel_ready_tx, mut data_channel_ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    
     println!("🏗️ WebRTC架构已初始化：主线程专注信令通信...");
     
     // 主线程：处理信令WebSocket连接和WebRTC协商
@@ -161,7 +164,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                     // 初始化WebRTC客户端
                                     if webrtc_client.is_none() {
                                         if let Some(client_id) = &config.client_id {
-                                            match WebRTCClient::new(client_id.clone(), signaling_tx.clone()).await {
+                                            match WebRTCClient::new(client_id.clone(), signaling_tx.clone(), Some(data_channel_ready_tx.clone())).await {
                                                 Ok(mut client) => {
                                                     if let Err(e) = client.setup_handlers().await {
                                                         println!("❌ 设置WebRTC处理器失败: {}", e);
@@ -186,18 +189,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                             println!("❌ 处理WebRTC Offer失败: {}", e);
                                         } else {
                                             client_state = ClientState::WebRTCConnected;
-                                            println!("🎯 WebRTC连接协商完成");
-                                            
-                                            // 启动屏幕捕获和输入处理线程
-                                            start_worker_threads(
-                                                &mut screen_thread_handle,
-                                                &mut input_thread_handle,
-                                                &mut screen_control_tx,
-                                                &mut screen_data_rx,
-                                                &mut input_control_tx,
-                                                &mut input_event_tx,
-                                                input_controller.clone(),
-                                            );
+                                            println!("🎯 WebRTC连接协商完成，等待数据通道建立...");
                                         }
                                     }
                                 }
@@ -291,6 +283,22 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                         break;
                     }
                 }
+            }
+            
+            // 等待数据通道就绪
+            Some(_) = data_channel_ready_rx.recv() => {
+                println!("🎉 数据通道已就绪，启动屏幕捕获和输入处理！");
+                
+                // 现在才启动屏幕捕获和输入处理线程
+                start_worker_threads(
+                    &mut screen_thread_handle,
+                    &mut input_thread_handle,
+                    &mut screen_control_tx,
+                    &mut screen_data_rx,
+                    &mut input_control_tx,
+                    &mut input_event_tx,
+                    input_controller.clone(),
+                );
             }
             
             // 接收来自屏幕捕获线程的数据并通过WebRTC发送
