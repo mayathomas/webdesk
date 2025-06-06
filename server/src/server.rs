@@ -45,16 +45,16 @@ pub async fn start_server(addr: SocketAddr) -> Result<()> {
             ws.on_upgrade(move |socket| handle_websocket(socket, state))
         });
     
-    // 静态文件路由
-    let static_files = warp::path("static").and(warp::fs::dir("static"));
+    // 静态文件路由 - 直接提供静态文件
+    let static_files = warp::fs::dir("static");
     
-    // 首页路由
+    // 首页路由 - 直接重定向到index.html
     let index = warp::path::end().and(warp::get()).map(|| {
-        warp::reply::html(include_str!("../static/index.html"))
+        warp::redirect::found(warp::http::Uri::from_static("/index.html"))
     });
     
-    // 合并所有路由
-    let routes = websocket.or(static_files).or(index);
+    // 合并所有路由 - 注意顺序：WebSocket优先，然后首页，最后静态文件
+    let routes = websocket.or(index).or(static_files);
     
     println!("🌐 HTTP和WebSocket服务器正在监听: {}", addr);
     println!("   - 网页界面: http://{}", addr);
