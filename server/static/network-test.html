@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC网络连接测试</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-item {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .log {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌐 WebRTC网络连接测试</h1>
+        <p>此测试页面帮助诊断WebRTC连接问题，检查ICE服务器可用性和网络环境。</p>
+
+        <div class="test-item">
+            <h3>🧊 ICE服务器连通性测试</h3>
+            <button onclick="testICEServers()">开始测试</button>
+            <div id="iceStatus" class="status info">点击开始测试</div>
+            <div id="iceLog" class="log"></div>
+        </div>
+
+        <div class="test-item">
+            <h3>🔗 WebRTC自连接测试</h3>
+            <button onclick="testSelfConnection()">开始测试</button>
+            <div id="selfStatus" class="status info">点击开始测试</div>
+            <div id="selfLog" class="log"></div>
+        </div>
+
+        <div class="test-item">
+            <h3>📋 网络信息</h3>
+            <div id="networkInfo"></div>
+        </div>
+    </div>
+
+    <script>
+        // 使用相同的ICE服务器配置
+        const rtcConfiguration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun.stunprotocol.org:3478' },
+                { urls: 'stun:stun.voiparound.com' },
+                {
+                    urls: 'turn:numb.viagenie.ca',
+                    credential: 'muazkh',
+                    username: 'webrtc@live.com'
+                },
+                {
+                    urls: 'turn:192.158.29.39:3478?transport=udp',
+                    credential: 'JZEOEt2V3Qb0y27GRntt2u2PAYA=',
+                    username: '28224511:1379330808'
+                },
+                {
+                    urls: 'turn:192.158.29.39:3478?transport=tcp',
+                    credential: 'JZEOEt2V3Qb0y27GRntt2u2PAYA=',
+                    username: '28224511:1379330808'
+                }
+            ],
+            iceCandidatePoolSize: 10
+        };
+
+        function log(elementId, message) {
+            const element = document.getElementById(elementId);
+            element.innerHTML += new Date().toLocaleTimeString() + ': ' + message + '<br>';
+            element.scrollTop = element.scrollHeight;
+        }
+
+        function setStatus(elementId, message, type) {
+            const element = document.getElementById(elementId);
+            element.textContent = message;
+            element.className = `status ${type}`;
+        }
+
+        async function testICEServers() {
+            const button = event.target;
+            button.disabled = true;
+            
+            setStatus('iceStatus', '正在测试ICE服务器...', 'info');
+            document.getElementById('iceLog').innerHTML = '';
+
+            const pc = new RTCPeerConnection(rtcConfiguration);
+            const candidateTypes = new Set();
+            let candidateCount = 0;
+
+            pc.onicecandidate = function(event) {
+                if (event.candidate) {
+                    candidateCount++;
+                    const candidate = event.candidate.candidate;
+                    const type = candidate.includes('typ host') ? 'host' : 
+                                candidate.includes('typ srflx') ? 'srflx' : 
+                                candidate.includes('typ relay') ? 'relay' : 'unknown';
+                    candidateTypes.add(type);
+                    log('iceLog', `候选 ${candidateCount}: ${type} - ${candidate}`);
+                } else {
+                    log('iceLog', '--- ICE候选收集完成 ---');
+                    
+                    if (candidateTypes.has('srflx')) {
+                        setStatus('iceStatus', '✅ STUN服务器工作正常，可以获取公网IP', 'success');
+                    } else if (candidateTypes.has('relay')) {
+                        setStatus('iceStatus', '✅ TURN服务器工作正常，可以中继流量', 'success');
+                    } else if (candidateTypes.has('host')) {
+                        setStatus('iceStatus', '⚠️ 只获取到本地候选，可能存在网络限制', 'error');
+                    } else {
+                        setStatus('iceStatus', '❌ 未获取到任何ICE候选', 'error');
+                    }
+                    
+                    log('iceLog', `总候选数: ${candidateCount}, 类型: ${Array.from(candidateTypes).join(', ')}`);
+                    button.disabled = false;
+                    pc.close();
+                }
+            };
+
+            // 创建数据通道触发ICE收集
+            pc.createDataChannel('test');
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+        }
+
+        async function testSelfConnection() {
+            const button = event.target;
+            button.disabled = true;
+            
+            setStatus('selfStatus', '正在测试自连接...', 'info');
+            document.getElementById('selfLog').innerHTML = '';
+
+            const pc1 = new RTCPeerConnection(rtcConfiguration);
+            const pc2 = new RTCPeerConnection(rtcConfiguration);
+
+            let pc1Connected = false;
+            let pc2Connected = false;
+
+            pc1.onconnectionstatechange = function() {
+                log('selfLog', `PC1 连接状态: ${pc1.connectionState}`);
+                if (pc1.connectionState === 'connected') {
+                    pc1Connected = true;
+                    if (pc2Connected) {
+                        setStatus('selfStatus', '✅ 自连接测试成功，WebRTC环境正常', 'success');
+                    }
+                } else if (pc1.connectionState === 'failed') {
+                    setStatus('selfStatus', '❌ 自连接测试失败，网络环境可能有问题', 'error');
+                }
+            };
+
+            pc2.onconnectionstatechange = function() {
+                log('selfLog', `PC2 连接状态: ${pc2.connectionState}`);
+                if (pc2.connectionState === 'connected') {
+                    pc2Connected = true;
+                    if (pc1Connected) {
+                        setStatus('selfStatus', '✅ 自连接测试成功，WebRTC环境正常', 'success');
+                    }
+                } else if (pc2.connectionState === 'failed') {
+                    setStatus('selfStatus', '❌ 自连接测试失败，网络环境可能有问题', 'error');
+                }
+            };
+
+            // ICE候选交换
+            pc1.onicecandidate = function(event) {
+                if (event.candidate) {
+                    pc2.addIceCandidate(event.candidate);
+                    log('selfLog', 'PC1 -> PC2: ICE候选');
+                }
+            };
+
+            pc2.onicecandidate = function(event) {
+                if (event.candidate) {
+                    pc1.addIceCandidate(event.candidate);
+                    log('selfLog', 'PC2 -> PC1: ICE候选');
+                }
+            };
+
+            // 数据通道
+            const dc1 = pc1.createDataChannel('test');
+            dc1.onopen = function() {
+                log('selfLog', '✅ 数据通道已打开');
+                dc1.send('Hello from PC1');
+            };
+
+            pc2.ondatachannel = function(event) {
+                const dc2 = event.channel;
+                dc2.onmessage = function(event) {
+                    log('selfLog', `📥 收到消息: ${event.data}`);
+                    dc2.send('Hello from PC2');
+                };
+            };
+
+            dc1.onmessage = function(event) {
+                log('selfLog', `📥 收到回复: ${event.data}`);
+            };
+
+            // 开始连接过程
+            const offer = await pc1.createOffer();
+            await pc1.setLocalDescription(offer);
+            await pc2.setRemoteDescription(offer);
+
+            const answer = await pc2.createAnswer();
+            await pc2.setLocalDescription(answer);
+            await pc1.setRemoteDescription(answer);
+
+            log('selfLog', '🔄 SDP交换完成，等待ICE连接...');
+
+            // 5秒后自动结束测试
+            setTimeout(() => {
+                if (!pc1Connected || !pc2Connected) {
+                    setStatus('selfStatus', '❌ 连接超时，可能存在网络问题', 'error');
+                }
+                pc1.close();
+                pc2.close();
+                button.disabled = false;
+            }, 10000);
+        }
+
+        // 显示网络信息
+        function showNetworkInfo() {
+            const info = document.getElementById('networkInfo');
+            info.innerHTML = `
+                <p><strong>用户代理:</strong> ${navigator.userAgent}</p>
+                <p><strong>当前URL:</strong> ${window.location.href}</p>
+                <p><strong>连接类型:</strong> ${navigator.connection ? navigator.connection.effectiveType : '未知'}</p>
+                <p><strong>时区:</strong> ${Intl.DateTimeFormat().resolvedOptions().timeZone}</p>
+                <p><strong>语言:</strong> ${navigator.language}</p>
+            `;
+        }
+
+        // 页面加载完成后显示网络信息
+        window.onload = showNetworkInfo;
+    </script>
+</body>
+</html> 

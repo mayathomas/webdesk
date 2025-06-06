@@ -51,14 +51,47 @@ impl WebRTCClient {
             .with_interceptor_registry(registry)
             .build();
         
-        // 创建ICE服务器配置（使用Google的STUN服务器）
+        // 创建ICE服务器配置 - 增强版本，支持更复杂的网络环境
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
+            ice_servers: vec![
+                // Google STUN服务器
+                RTCIceServer {
+                    urls: vec![
+                        "stun:stun.l.google.com:19302".to_owned(),
+                        "stun:stun1.l.google.com:19302".to_owned(),
+                        "stun:stun2.l.google.com:19302".to_owned(),
+                    ],
+                    ..Default::default()
+                },
+                // 其他公共STUN服务器
+                RTCIceServer {
+                    urls: vec![
+                        "stun:stun.stunprotocol.org:3478".to_owned(),
+                        "stun:stun.voiparound.com".to_owned(),
+                    ],
+                    ..Default::default()
+                },
+                // 免费TURN服务器
+                RTCIceServer {
+                    urls: vec!["turn:numb.viagenie.ca".to_owned()],
+                    username: "webrtc@live.com".to_owned(),
+                    credential: "muazkh".to_owned(),
+                    ..Default::default()
+                },
+                RTCIceServer {
+                    urls: vec![
+                        "turn:192.158.29.39:3478?transport=udp".to_owned(),
+                        "turn:192.158.29.39:3478?transport=tcp".to_owned(),
+                    ],
+                    username: "28224511:1379330808".to_owned(),
+                    credential: "JZEOEt2V3Qb0y27GRntt2u2PAYA=".to_owned(),
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
+        
+        println!("📋 ICE服务器配置完成: {} 个服务器", config.ice_servers.len());
         
         // 创建PeerConnection
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
@@ -125,11 +158,11 @@ impl WebRTCClient {
                 if let Some(candidate) = candidate {
                     // webrtc-rs的candidate.to_string()返回格式如："udp host 192.168.1.3:49796"
                     let candidate_string = candidate.to_string();
-                    println!("🧊 原始候选字符串: {}", candidate_string);
+                    println!("🧊 收集到ICE候选: {}", candidate_string);
                     
                     // 解析并重新构造标准的SDP候选格式
                     let formatted_candidate = parse_and_format_candidate(&candidate_string);
-                    println!("🧊 标准SDP候选: {}", formatted_candidate);
+                    println!("🧊 发送标准SDP候选: {}", formatted_candidate);
                     
                     let ice_msg = WebSocketMessage::WebRTCIceCandidate {
                         target_id: client_id,
@@ -141,7 +174,11 @@ impl WebRTCClient {
                         },
                     };
                     
-                    let _ = signaling_tx.send(ice_msg);
+                    if let Err(e) = signaling_tx.send(ice_msg) {
+                        println!("❌ 发送ICE候选失败: {}", e);
+                    }
+                } else {
+                    println!("🏁 ICE候选收集完成");
                 }
             })
         }));
