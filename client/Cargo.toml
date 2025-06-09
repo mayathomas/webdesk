@@ -41,6 +41,10 @@ bytes = "1.0"
 tauri = { version = "2.0", features = ["tray-icon"] }
 tauri-plugin-shell = "2.0"
 
+# 日志依赖
+log = { workspace = true }
+env_logger = { workspace = true }
+
 # Tauri特性
 [features]
 # 默认特性

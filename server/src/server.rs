@@ -33,9 +33,9 @@ impl ServerState {
 pub async fn start_server(addr: SocketAddr) -> Result<()> {
     let state = ServerState::new();
     
-    println!("🚀 启动WebRTC远程控制服务器...");
-    println!("   📡 支持WebRTC P2P连接");
-    println!("   🔗 WebSocket信令服务器");
+    log::info!("🚀 启动WebRTC远程控制服务器...");
+    log::info!("   📡 支持WebRTC P2P连接");
+    log::info!("   🔗 WebSocket信令服务器");
     
     // WebSocket路由 - /ws
     let state_filter = warp::any().map(move || state.clone());
@@ -59,7 +59,7 @@ pub async fn start_server(addr: SocketAddr) -> Result<()> {
                     )
                 }
                 Err(e) => {
-                    println!("❌ 加载WebRTC配置失败: {}", e);
+                    log::error!("❌ 加载WebRTC配置失败: {}", e);
                     let error = serde_json::json!({
                         "error": format!("Failed to load config: {}", e)
                     });
@@ -82,9 +82,9 @@ pub async fn start_server(addr: SocketAddr) -> Result<()> {
     // 合并所有路由 - 注意顺序：WebSocket优先，API，然后首页，最后静态文件
     let routes = websocket.or(webrtc_config).or(index).or(static_files);
     
-    println!("🌐 HTTP和WebSocket服务器正在监听: {}", addr);
-    println!("   - 网页界面: http://{}", addr);
-    println!("   - WebSocket信令: ws://{}/ws", addr);
+    log::info!("🌐 HTTP和WebSocket服务器正在监听: {}", addr);
+    log::info!("   - 网页界面: http://{}", addr);
+    log::info!("   - WebSocket信令: ws://{}/ws", addr);
     
     warp::serve(routes).run(addr).await;
     
@@ -133,7 +133,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                 connection_type = Some("client".to_string());
                                 client_id = Some(id.clone());
                                 
-                                println!("📱 客户端已注册: {}", id);
+                                log::info!("📱 客户端已注册: {}", id);
                                 
                                 let response = WebSocketMessage::RegisterResponse(RegisterResponse {
                                     client_id: id,
@@ -155,7 +155,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                         connection_type = Some("browser".to_string());
                                         client_id = Some(req.client_id.clone());
                                         
-                                        println!("🌐 浏览器开始WebRTC信令交换: {}", req.client_id);
+                                        log::info!("🌐 浏览器开始WebRTC信令交换: {}", req.client_id);
                                         
                                         // 向浏览器发送连接成功响应
                                         let response = WebSocketMessage::Connected {
@@ -178,7 +178,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                             }
                                         }
                                     } else {
-                                        println!("❌ 浏览器连接失败: 验证码错误");
+                                        log::warn!("❌ 浏览器连接失败: 验证码错误");
                                         let response = WebSocketMessage::Error {
                                             message: "验证码错误".to_string(),
                                         };
@@ -188,7 +188,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                         }
                                     }
                                 } else {
-                                    println!("❌ 浏览器连接失败: 客户端ID不存在");
+                                    log::warn!("❌ 浏览器连接失败: 客户端ID不存在");
                                     let response = WebSocketMessage::Error {
                                         message: "客户端ID不存在".to_string(),
                                     };
@@ -201,7 +201,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             
                             // WebRTC 信令消息转发
                             WebSocketMessage::WebRTCOffer { target_id, session_description } => {
-                                println!("📡 转发WebRTC Offer到客户端: {}", target_id);
+                                log::debug!("📡 转发WebRTC Offer到客户端: {}", target_id);
                                 if let Some(client_tx) = state.client_connections.get(&target_id) {
                                     let msg = WebSocketMessage::WebRTCOffer { 
                                         target_id: target_id.clone(), 
@@ -214,7 +214,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             }
                             
                             WebSocketMessage::WebRTCAnswer { target_id, session_description } => {
-                                println!("📡 转发WebRTC Answer到浏览器: {}", target_id);
+                                log::debug!("📡 转发WebRTC Answer到浏览器: {}", target_id);
                                 if let Some(browser_tx) = state.browser_connections.get(&target_id) {
                                     let msg = WebSocketMessage::WebRTCAnswer { 
                                         target_id: target_id.clone(), 
@@ -228,7 +228,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             
                             WebSocketMessage::WebRTCIceCandidate { target_id, ice_candidate } => {
                                 let candidate_string = ice_candidate.candidate.clone();
-                                println!("🧊 转发ICE候选，target_id: {}, 候选: {}", target_id, candidate_string);
+                                log::debug!("🧊 转发ICE候选，target_id: {}, 候选: {}", target_id, candidate_string);
                                 
                                 // 判断发送方和接收方
                                 if target_id == "browser" {
@@ -241,10 +241,10 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                             };
                                             if let Ok(json) = serde_json::to_string(&msg) {
                                                 let _ = browser_tx.send(Message::text(json));
-                                                println!("✅ ICE候选已转发到浏览器: {}, 候选: {}", current_client_id, candidate_string);
+                                                log::debug!("✅ ICE候选已转发到浏览器: {}, 候选: {}", current_client_id, candidate_string);
                                             }
                                         } else {
-                                            println!("⚠️ 未找到对应的浏览器连接: {}, 候选: {}", current_client_id, candidate_string);
+                                            log::debug!("⚠️ 未找到对应的浏览器连接: {}, 候选: {}", current_client_id, candidate_string);
                                         }
                                     }
                                 } else {
@@ -256,10 +256,10 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                         };
                                         if let Ok(json) = serde_json::to_string(&msg) {
                                             let _ = client_tx.send(Message::text(json));
-                                            println!("✅ ICE候选已转发到客户端: {}, 候选: {}", target_id, candidate_string);
+                                            log::debug!("✅ ICE候选已转发到客户端: {}, 候选: {}", target_id, candidate_string);
                                         }
                                     } else {
-                                        println!("⚠️ 未找到对应的客户端连接: {}, 候选: {}", target_id, candidate_string);
+                                        log::debug!("⚠️ 未找到对应的客户端连接: {}, 候选: {}", target_id, candidate_string);
                                     }
                                 }
                             }
@@ -304,7 +304,7 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             WebSocketMessage::Disconnect => {
                                 // 断开连接
                                 if let Some(id) = &client_id {
-                                    println!("🌐 连接已断开: {}", id);
+                                    log::info!("🌐 连接已断开: {}", id);
                                     if let Some(mut client_state) = state.clients.get_mut(id) {
                                         client_state.browser_connected = false;
                                     }
@@ -347,14 +347,14 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
     if let Some(id) = client_id {
         match connection_type.as_deref() {
             Some("client") => {
-                println!("📱 客户端已断开连接: {}", id);
+                log::info!("📱 客户端已断开连接: {}", id);
                 state.client_connections.remove(&id);
                 if let Some(mut client_state) = state.clients.get_mut(&id) {
                     client_state.is_connected = false;
                 }
             }
             Some("browser") => {
-                println!("🌐 浏览器信令连接已断开: {}", id);
+                log::info!("🌐 浏览器信令连接已断开: {}", id);
                 state.browser_connections.remove(&id);
                 if let Some(mut client_state) = state.clients.get_mut(&id) {
                     client_state.browser_connected = false;

@@ -156,7 +156,7 @@ impl InputController {
             "Insert" => Some(Key::Insert),
             
             _ => {
-                println!("未知的键码: {}", key_code);
+                log::debug!("未知的键码: {}", key_code);
                 None
             }
         }

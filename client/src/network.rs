@@ -13,7 +13,7 @@ use crate::webrtc::WebRTCClient;
 
 /// 运行远程控制服务
 pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
-    println!("💻 启动远程控制客户端 (WebRTC + 信令服务器架构)...");
+    log::info!("💻 启动远程控制客户端 (WebRTC + 信令服务器架构)...");
     
     // 发送启动中状态
     let _ = app.emit("status-update", serde_json::json!({
@@ -39,12 +39,12 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
         }
     };
     
-    println!("⚙️ 客户端配置:");
-    println!("   📡 信令服务器地址: {}", config.server_url);
-    println!("   🏠 MAC地址: {}", mac_address);
-    println!("   🔑 验证码: {}", config.auth_code);
+    log::info!("⚙️ 客户端配置:");
+    log::info!("   📡 信令服务器地址: {}", config.server_url);
+    log::info!("   🏠 MAC地址: {}", mac_address);
+    log::info!("   🔑 验证码: {}", config.auth_code);
     if let Some(client_id) = &config.client_id {
-        println!("   🆔 客户端ID: {}", client_id);
+        log::info!("   🆔 客户端ID: {}", client_id);
     }
     
     // 连接到信令服务器
@@ -59,12 +59,12 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
         }
     };
     
-    println!("🔌 正在连接到信令服务器: {}", url);
+    log::info!("🔌 正在连接到信令服务器: {}", url);
     
     let (ws_stream, _) = match connect_async(url).await {
         Ok(result) => result,
         Err(e) => {
-            println!("❌ 连接信令服务器失败: {}", e);
+            log::error!("❌ 连接信令服务器失败: {}", e);
             let _ = app.emit("status-update", serde_json::json!({
                 "state": "连接服务器失败",
                 "running": false
@@ -73,7 +73,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
         }
     };
     
-    println!("✅ 信令WebSocket连接已建立");
+    log::debug!("✅ 信令WebSocket连接已建立");
     
     // 立即发送连接成功状态到前端
     let _ = app.emit("status-update", serde_json::json!({
@@ -90,7 +90,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
     });
     
     let register_msg = serde_json::to_string(&register_request)?;
-    println!("📤 发送注册请求: {}", register_msg);
+    log::debug!("📤 发送注册请求: {}", register_msg);
     ws_sender.send(Message::Text(register_msg)).await?;
     
     // 发送注册中状态到前端
@@ -122,7 +122,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
     // 数据通道就绪通知通道
     let (data_channel_ready_tx, mut data_channel_ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     
-    println!("🏗️ WebRTC架构已初始化：主线程专注信令通信...");
+    log::debug!("🏗️ WebRTC架构已初始化：主线程专注信令通信...");
     
     // 主线程：处理信令WebSocket连接和WebRTC协商
     loop {
@@ -131,13 +131,13 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        println!("📥 收到信令服务器消息: {}", text);
+                        log::debug!("📥 收到信令服务器消息: {}", text);
                         if let Ok(ws_msg) = serde_json::from_str::<WebSocketMessage>(&text) {
-                            println!("📦 解析消息类型: {:?}", std::mem::discriminant(&ws_msg));
+                            log::debug!("📦 解析消息类型: {:?}", std::mem::discriminant(&ws_msg));
                             match ws_msg {
                                 WebSocketMessage::RegisterResponse(response) => {
                                     if response.success {
-                                        println!("🎉 注册成功，客户端ID: {}", response.client_id);
+                                        log::debug!("🎉 注册成功，客户端ID: {}", response.client_id);
                                         config.update_client_id(response.client_id.clone())?;
                                         
                                         // 更新状态
@@ -153,12 +153,12 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                             "clientId": response.client_id
                                         }));
                                     } else {
-                                        println!("❌ 注册失败: {}", response.message);
+                                        log::error!("❌ 注册失败: {}", response.message);
                                     }
                                 }
                                 
                                 WebSocketMessage::BrowserConnected { message } => {
-                                    println!("🌐 浏览器开始WebRTC连接: {}", message);
+                                    log::debug!("🌐 浏览器开始WebRTC连接: {}", message);
                                     client_state = ClientState::WebRTCConnecting;
                                     
                                     // 初始化WebRTC客户端
@@ -167,14 +167,14 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                             match WebRTCClient::new(client_id.clone(), signaling_tx.clone(), Some(data_channel_ready_tx.clone())).await {
                                                 Ok(mut client) => {
                                                     if let Err(e) = client.setup_handlers().await {
-                                                        println!("❌ 设置WebRTC处理器失败: {}", e);
+                                                        log::error!("❌ 设置WebRTC处理器失败: {}", e);
                                                     } else {
                                                         webrtc_client = Some(client);
-                                                        println!("✅ WebRTC客户端已初始化");
+                                                        log::debug!("✅ WebRTC客户端已初始化");
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    println!("❌ 创建WebRTC客户端失败: {}", e);
+                                                    log::error!("❌ 创建WebRTC客户端失败: {}", e);
                                                 }
                                             }
                                         }
@@ -183,28 +183,28 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                 
                                 // WebRTC信令处理
                                 WebSocketMessage::WebRTCOffer { session_description, .. } => {
-                                    println!("📡 收到WebRTC Offer");
+                                    log::debug!("📡 收到WebRTC Offer");
                                     if let Some(ref mut client) = webrtc_client {
                                         if let Err(e) = client.handle_offer(session_description).await {
-                                            println!("❌ 处理WebRTC Offer失败: {}", e);
+                                            log::error!("❌ 处理WebRTC Offer失败: {}", e);
                                         } else {
                                             client_state = ClientState::WebRTCConnected;
-                                            println!("🎯 WebRTC连接协商完成，等待数据通道建立...");
+                                            log::debug!("🎯 WebRTC连接协商完成，等待数据通道建立...");
                                         }
                                     }
                                 }
                                 
                                 WebSocketMessage::WebRTCIceCandidate { ice_candidate, .. } => {
-                                    println!("🧊 收到ICE候选");
+                                    log::debug!("🧊 收到ICE候选");
                                     if let Some(ref client) = webrtc_client {
                                         if let Err(e) = client.handle_ice_candidate(ice_candidate).await {
-                                            println!("❌ 处理ICE候选失败: {}", e);
+                                            log::error!("❌ 处理ICE候选失败: {}", e);
                                         }
                                     }
                                 }
                                 
                                 WebSocketMessage::BrowserDisconnected { message } => {
-                                    println!("🌐 浏览器已断开WebRTC连接: {}", message);
+                                    log::debug!("🌐 浏览器已断开WebRTC连接: {}", message);
                                     client_state = ClientState::WaitingForBrowser;
                                     
                                     // 关闭WebRTC连接
@@ -231,7 +231,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                 }
                                 
                                 WebSocketMessage::Error { message } => {
-                                    println!("⚠️ 信令服务器错误: {}", message);
+                                    log::debug!("⚠️ 信令服务器错误: {}", message);
                                 }
                                 
                                 WebSocketMessage::Ping => {
@@ -244,19 +244,19 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                 _ => {}
                             }
                         } else {
-                            println!("❌ 无法解析信令服务器消息: {}", text);
+                            log::error!("❌ 无法解析信令服务器消息: {}", text);
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
-                        println!("📡 信令服务器关闭了连接");
+                        log::debug!("📡 信令服务器关闭了连接");
                         break;
                     }
                     Some(Err(e)) => {
-                        eprintln!("❌ 信令WebSocket错误: {}", e);
+                        log::error!("❌ 信令WebSocket错误: {}", e);
                         break;
                     }
                     None => {
-                        println!("📡 信令WebSocket连接已断开");
+                        log::debug!("📡 信令WebSocket连接已断开");
                         break;
                     }
                     _ => {}
@@ -279,7 +279,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
             Some(signaling_msg) = signaling_rx.recv() => {
                 if let Ok(msg) = serde_json::to_string(&signaling_msg) {
                     if ws_sender.send(Message::Text(msg)).await.is_err() {
-                        println!("❌ 发送信令消息失败，连接可能已断开");
+                        log::error!("❌ 发送信令消息失败，连接可能已断开");
                         break;
                     }
                 }
@@ -287,7 +287,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
             
             // 等待数据通道就绪
             Some(_) = data_channel_ready_rx.recv() => {
-                println!("🎉 数据通道已就绪，启动屏幕捕获和输入处理！");
+                log::debug!("🎉 数据通道已就绪，启动屏幕捕获和输入处理！");
                 
                 // 现在才启动屏幕捕获和输入处理线程
                 start_worker_threads(
@@ -315,7 +315,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                         // 🔧 简化处理：连接断开时send_screen_data会自动返回Ok，不会出错
                         if let Err(e) = client.send_screen_data(&screen_data).await {
                             // 只有真正的发送错误才打印，连接状态问题已在send_screen_data中处理
-                            println!("❌ WebRTC发送错误: {}", e);
+                            log::error!("❌ WebRTC发送错误: {}", e);
                         }
                     }
                 }
@@ -324,7 +324,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
     }
     
     // 清理资源
-    println!("🧹 清理WebRTC和线程资源...");
+    log::debug!("🧹 清理WebRTC和线程资源...");
     
     // 关闭WebRTC连接
     if let Some(client) = webrtc_client.take() {
@@ -341,7 +341,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
         &mut input_event_tx,
     );
     
-    println!("👋 WebRTC远程控制服务已退出");
+    log::debug!("👋 WebRTC远程控制服务已退出");
     Ok(())
 }
 
@@ -363,10 +363,10 @@ fn start_worker_threads(
         *screen_control_tx = Some(s_ctrl_tx);
         *screen_data_rx = Some(s_data_rx);
         
-        println!("📷 启动屏幕捕获线程...");
+        log::debug!("📷 启动屏幕捕获线程...");
         *screen_thread_handle = Some(tokio::task::spawn_blocking(move || {
             if let Err(e) = threads::screen_capture_thread(s_ctrl_rx, s_data_tx) {
-                eprintln!("❌ 屏幕捕获线程错误: {}", e);
+                log::error!("❌ 屏幕捕获线程错误: {}", e);
             }
         }));
     }
@@ -379,7 +379,7 @@ fn start_worker_threads(
         *input_control_tx = Some(i_ctrl_tx);
         *input_event_tx = Some(i_event_tx);
         
-        println!("🎮 启动输入事件处理线程...");
+        log::debug!("🎮 启动输入事件处理线程...");
         *input_thread_handle = Some(tokio::spawn(async move {
             threads::input_event_thread(
                 input_controller,
@@ -407,7 +407,7 @@ fn stop_worker_threads(
     input_control_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<ThreadControlSignal>>,
     input_event_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<WebSocketMessage>>,
 ) {
-    println!("🛑 停止工作线程...");
+    log::debug!("🛑 停止工作线程...");
     
     if let Some(tx) = screen_control_tx {
         let _ = tx.send(ThreadControlSignal::Stop);

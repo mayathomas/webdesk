@@ -51,7 +51,7 @@ impl WebRTCClient {
         signaling_tx: mpsc::UnboundedSender<WebSocketMessage>,
         data_channel_ready_tx: Option<mpsc::UnboundedSender<()>>,
     ) -> Result<Self> {
-        println!("🌐 初始化WebRTC客户端...");
+        log::info!("🌐 初始化WebRTC客户端...");
         
         // 创建媒体引擎
         let mut media_engine = MediaEngine::default();
@@ -72,11 +72,11 @@ impl WebRTCClient {
         // 从YAML配置文件加载ICE服务器配置
         let ice_servers = match crate::config::WebRtcConfig::load_from_file("webrtc-config.yaml") {
             Ok(config) => {
-                println!("📋 已加载WebRTC配置文件");
+                log::info!("📋 已加载WebRTC配置文件");
                 config.to_ice_servers()
             }
             Err(e) => {
-                println!("⚠️ 加载WebRTC配置失败，使用默认配置: {}", e);
+                log::warn!("⚠️ 加载WebRTC配置失败，使用默认配置: {}", e);
                 // 使用默认配置作为备份
                 vec![
                     RTCIceServer {
@@ -95,7 +95,7 @@ impl WebRTCClient {
             }
         };
         
-        println!("📋 ICE服务器配置完成: {} 个STUN服务器", ice_servers.len());
+        log::info!("📋 ICE服务器配置完成: {} 个STUN服务器", ice_servers.len());
         
         // 创建PeerConnection
         let peer_connection = Arc::new(api.new_peer_connection(RTCConfiguration {
@@ -105,7 +105,7 @@ impl WebRTCClient {
             ..Default::default()
         }).await?);
         
-        println!("✅ WebRTC PeerConnection 已创建");
+        log::info!("✅ WebRTC PeerConnection 已创建");
         
         Ok(Self {
             peer_connection,
@@ -124,45 +124,45 @@ impl WebRTCClient {
         // 监听连接状态变化
         let peer_connection_clone_state = self.peer_connection.clone();
         self.peer_connection.on_peer_connection_state_change(Box::new(move |state| {
-            println!("🔗 WebRTC连接状态变化: {:?}", state);
+            log::debug!("🔗 WebRTC连接状态变化: {:?}", state);
             match state {
                 RTCPeerConnectionState::Connected => {
-                    println!("🎉 WebRTC P2P连接已建立！数据通道应该可用了！");
+                    log::info!("🎉 WebRTC P2P连接已建立！数据通道应该可用了！");
                 }
                 RTCPeerConnectionState::Connecting => {
-                    println!("🔄 WebRTC正在连接...");
+                    log::info!("🔄 WebRTC正在连接...");
                 }
                 RTCPeerConnectionState::Disconnected => {
-                    println!("⚠️ WebRTC连接已断开");
+                    log::warn!("⚠️ WebRTC连接已断开");
                 }
                 RTCPeerConnectionState::Failed => {
-                    println!("❌ WebRTC连接失败");
+                    log::error!("❌ WebRTC连接失败");
                     
                     // 获取详细的连接失败信息
                     let pc = peer_connection_clone_state.clone();
                     tokio::spawn(async move {
-                        println!("🔍 尝试获取详细的WebRTC失败信息...");
+                        log::debug!("🔍 尝试获取详细的WebRTC失败信息...");
                         
                         // 检查连接状态
-                        println!("🔗 当前连接状态: {:?}", pc.connection_state());
-                        println!("🧊 当前ICE连接状态: {:?}", pc.ice_connection_state());
-                        println!("📡 当前ICE收集状态: {:?}", pc.ice_gathering_state());
+                        log::debug!("🔗 当前连接状态: {:?}", pc.connection_state());
+                        log::debug!("🧊 当前ICE连接状态: {:?}", pc.ice_connection_state());
+                        log::debug!("📡 当前ICE收集状态: {:?}", pc.ice_gathering_state());
                         
                         // 获取本地和远程描述
                         if let Some(local_desc) = pc.local_description().await {
-                            println!("📤 本地描述: {:?}", local_desc.sdp);
+                            log::debug!("📤 本地描述: {:?}", local_desc.sdp);
                         }
                         if let Some(remote_desc) = pc.remote_description().await {
-                            println!("📥 远程描述: {:?}", remote_desc.sdp);
+                            log::debug!("📥 远程描述: {:?}", remote_desc.sdp);
                         }
 
                     });
                 }
                 RTCPeerConnectionState::Closed => {
-                    println!("🔒 WebRTC连接已关闭");
+                    log::info!("🔒 WebRTC连接已关闭");
                 }
                 _ => {
-                    println!("🔍 WebRTC连接状态: {:?}", state);
+                    log::debug!("🔍 WebRTC连接状态: {:?}", state);
                 }
             }
             Box::pin(async {})
@@ -171,10 +171,10 @@ impl WebRTCClient {
         // 监听ICE连接状态变化
         let peer_connection_clone_ice = self.peer_connection.clone();
         self.peer_connection.on_ice_connection_state_change(Box::new(move |state| {
-            println!("🧊 ICE连接状态变化: {:?}", state);
+            log::debug!("🧊 ICE连接状态变化: {:?}", state);
             match state {
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Checking => {
-                    println!("🔍 ICE正在检查连通性...");
+                    log::debug!("🔍 ICE正在检查连通性...");
                     
                     // 🔧 关键修复：在强制中继模式下，增加详细的ICE调试信息
                     let pc = peer_connection_clone_ice.clone();
@@ -182,10 +182,10 @@ impl WebRTCClient {
                         // 等待一些时间让ICE检查进行
                         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
                         
-                        println!("🔍 强制中继模式下的ICE检查状态:");
-                        println!("   🔗 连接状态: {:?}", pc.connection_state());
-                        println!("   🧊 ICE连接状态: {:?}", pc.ice_connection_state());
-                        println!("   📡 ICE收集状态: {:?}", pc.ice_gathering_state());
+                        log::debug!("🔍 强制中继模式下的ICE检查状态:");
+                        log::debug!("   🔗 连接状态: {:?}", pc.connection_state());
+                        log::debug!("   🧊 ICE连接状态: {:?}", pc.ice_connection_state());
+                        log::debug!("   📡 ICE收集状态: {:?}", pc.ice_gathering_state());
                         
                         // 检查本地描述中的ICE参数
                         if let Some(local_desc) = pc.local_description().await {
@@ -193,9 +193,9 @@ impl WebRTCClient {
                                 .filter(|line| line.contains("ice-") || line.contains("candidate"))
                                 .collect();
                             if !ice_lines.is_empty() {
-                                println!("   📤 本地ICE参数:");
+                                log::debug!("   📤 本地ICE参数:");
                                 for line in &ice_lines[..std::cmp::min(5, ice_lines.len())] {
-                                    println!("      {}", line);
+                                    log::debug!("      {}", line);
                                 }
                             }
                         }
@@ -206,39 +206,39 @@ impl WebRTCClient {
                                 .filter(|line| line.contains("ice-") || line.contains("candidate"))
                                 .collect();
                             if !ice_lines.is_empty() {
-                                println!("   📥 远程ICE参数:");
+                                log::debug!("   📥 远程ICE参数:");
                                 for line in &ice_lines[..std::cmp::min(5, ice_lines.len())] {
-                                    println!("      {}", line);
+                                    log::debug!("      {}", line);
                                 }
                             }
                         }
                     });
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected => {
-                    println!("🎉 ICE连接已建立！");
+                    log::info!("🎉 ICE连接已建立！");
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Completed => {
-                    println!("✅ ICE连接完成！");
+                    log::info!("✅ ICE连接完成！");
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Failed => {
-                    println!("❌ ICE连接失败！");
+                    log::error!("❌ ICE连接失败！");
                     
                     // 🔧 增强失败分析：特别针对强制中继模式
                     let pc = peer_connection_clone_ice.clone();
                     tokio::spawn(async move {
-                        println!("🔍 强制中继模式ICE失败详细分析:");
-                        println!("   🔗 连接状态: {:?}", pc.connection_state());
-                        println!("   🧊 ICE连接状态: {:?}", pc.ice_connection_state());
-                        println!("   📡 ICE收集状态: {:?}", pc.ice_gathering_state());
+                        log::debug!("🔍 强制中继模式ICE失败详细分析:");
+                        log::debug!("   🔗 连接状态: {:?}", pc.connection_state());
+                        log::debug!("   🧊 ICE连接状态: {:?}", pc.ice_connection_state());
+                        log::debug!("   📡 ICE收集状态: {:?}", pc.ice_gathering_state());
                         
                         // 分析本地和远程的relay候选
                         if let Some(local_desc) = pc.local_description().await {
                             let relay_candidates: Vec<&str> = local_desc.sdp.lines()
                                 .filter(|line| line.contains("typ relay"))
                                 .collect();
-                            println!("   📤 本地relay候选数量: {}", relay_candidates.len());
+                            log::debug!("   📤 本地relay候选数量: {}", relay_candidates.len());
                             for (i, candidate) in relay_candidates.iter().enumerate() {
-                                println!("      {}: {}", i+1, candidate);
+                                log::debug!("      {}: {}", i+1, candidate);
                             }
                         }
                         
@@ -246,19 +246,19 @@ impl WebRTCClient {
                             let relay_candidates: Vec<&str> = remote_desc.sdp.lines()
                                 .filter(|line| line.contains("typ relay"))
                                 .collect();
-                            println!("   📥 远程relay候选数量: {}", relay_candidates.len());
+                            log::debug!("   📥 远程relay候选数量: {}", relay_candidates.len());
                             for (i, candidate) in relay_candidates.iter().enumerate() {
-                                println!("      {}: {}", i+1, candidate);
+                                log::debug!("      {}: {}", i+1, candidate);
                             }
                         }
 
                     });
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Disconnected => {
-                    println!("⚠️ ICE连接已断开");
+                    log::warn!("⚠️ ICE连接已断开");
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Closed => {
-                    println!("🔒 ICE连接已关闭");
+                    log::info!("🔒 ICE连接已关闭");
                 }
                 _ => {}
             }
@@ -267,7 +267,7 @@ impl WebRTCClient {
         
         // 监听ICE收集状态变化
         self.peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
-            println!("📡 ICE收集状态变化: {:?}", state);
+            log::debug!("📡 ICE收集状态变化: {:?}", state);
             Box::pin(async {})
         }));
         
@@ -282,14 +282,14 @@ impl WebRTCClient {
                 if let Some(candidate) = candidate {
                     // webrtc-rs的candidate.to_string()返回格式如："udp host 192.168.1.3:49796"
                     let candidate_string = candidate.to_string();
-                    println!("🧊 收集到ICE候选: {}", candidate_string);
+                    log::debug!("🧊 收集到ICE候选: {}", candidate_string);
                     
                     // 🔧 关键修复：解析并重新构造标准的SDP候选格式
                     let formatted_candidate = parse_and_format_candidate(&candidate_string);
                     
                     // 只发送有效的候选（非空字符串）
                     if !formatted_candidate.is_empty() {
-                        println!("🧊 发送标准SDP候选: {}", formatted_candidate);
+                        log::debug!("🧊 发送标准SDP候选: {}", formatted_candidate);
                         
                         let ice_msg = WebSocketMessage::WebRTCIceCandidate {
                             target_id: client_id,
@@ -302,13 +302,13 @@ impl WebRTCClient {
                         };
                         
                         if let Err(e) = signaling_tx.send(ice_msg) {
-                            println!("❌ 发送ICE候选失败: {}", e);
+                            log::error!("❌ 发送ICE候选失败: {}", e);
                         }
                     } else {
-                        println!("⚠️ 跳过发送无效的ICE候选");
+                        log::debug!("⚠️ 跳过发送无效的ICE候选");
                     }
                 } else {
-                    println!("🏁 ICE候选收集完成");
+                    log::debug!("🏁 ICE候选收集完成");
                 }
             })
         }));
@@ -319,24 +319,24 @@ impl WebRTCClient {
         
         self.peer_connection.on_data_channel(Box::new(move |data_channel| {
             let data_channel = Arc::clone(&data_channel);
-            println!("🎉 收到来自浏览器的数据通道: {} (状态: {:?})", 
+            log::info!("🎉 收到来自浏览器的数据通道: {} (状态: {:?})", 
                 data_channel.label(), data_channel.ready_state());
             
             // 保存数据通道引用
             if let Ok(mut dc_ref) = data_channel_ref.lock() {
                 *dc_ref = Some(Arc::clone(&data_channel));
-                println!("✅ 数据通道引用已保存到客户端");
+                log::debug!("✅ 数据通道引用已保存到客户端");
             } else {
-                println!("❌ 无法保存数据通道引用");
+                log::error!("❌ 无法保存数据通道引用");
             }
             
             // 设置数据通道监听器
             let dc_clone_for_open = Arc::clone(&data_channel);
             let ready_tx = ready_tx_clone.clone();
             data_channel.on_open(Box::new(move || {
-                println!("🚀 数据通道已打开，可以开始双向数据传输！状态: {:?}", 
+                log::info!("🚀 数据通道已打开，可以开始双向数据传输！状态: {:?}", 
                     dc_clone_for_open.ready_state());
-                println!("🎉 现在可以开始屏幕捕获和传输了！");
+                log::info!("🎉 现在可以开始屏幕捕获和传输了！");
                 
                 // 通知主线程数据通道已就绪
                 if let Some(ref tx) = ready_tx {
@@ -348,14 +348,14 @@ impl WebRTCClient {
             
             let dc_clone_for_close = Arc::clone(&data_channel);
             data_channel.on_close(Box::new(move || {
-                println!("🔒 数据通道已关闭，状态: {:?}", 
+                log::info!("🔒 数据通道已关闭，状态: {:?}", 
                     dc_clone_for_close.ready_state());
                 Box::pin(async {})
             }));
             
             let dc_clone_for_error = Arc::clone(&data_channel);
             data_channel.on_error(Box::new(move |err| {
-                println!("❌ 数据通道错误: {:?}, 状态: {:?}", 
+                log::error!("❌ 数据通道错误: {:?}, 状态: {:?}", 
                     err, dc_clone_for_error.ready_state());
                 Box::pin(async {})
             }));
@@ -364,7 +364,7 @@ impl WebRTCClient {
             data_channel.on_message(Box::new(move |msg| {
                 let dc = Arc::clone(&dc_clone);
                 Box::pin(async move {
-                    println!("📨 收到浏览器数据: {} bytes", msg.data.len());
+                    log::debug!("📨 收到浏览器数据: {} bytes", msg.data.len());
                     handle_data_channel_message(dc, msg).await;
                 })
             }));
@@ -372,14 +372,14 @@ impl WebRTCClient {
             Box::pin(async {})
         }));
         
-        println!("✅ 数据通道监听器已设置");
+        log::debug!("✅ 数据通道监听器已设置");
         
         Ok(())
     }
     
     /// 处理WebRTC Offer
     pub async fn handle_offer(&mut self, session_description: SessionDescription) -> Result<()> {
-        println!("📥 处理WebRTC Offer");
+        log::info!("📥 处理WebRTC Offer");
         
         let offer = RTCSessionDescription::offer(session_description.sdp)?;
         self.peer_connection.set_remote_description(offer).await?;
@@ -394,12 +394,12 @@ impl WebRTCClient {
         let ice_complete_tx_clone = ice_complete_tx.clone();
         self.peer_connection.on_ice_candidate(Box::new(move |candidate| {
             if let Some(candidate) = candidate {
-                println!("🧊 收集到ICE候选: {}:{} {}", candidate.address, candidate.port, candidate.typ);
+                log::debug!("🧊 收集到ICE候选: {}:{} {}", candidate.address, candidate.port, candidate.typ);
             } else {
-                println!("✅ ICE候选收集完成 (收到null候选)");
+                log::debug!("✅ ICE候选收集完成 (收到null候选)");
                 // 收到null候选表示收集完成
                 if let Err(_) = ice_complete_tx_clone.send(()) {
-                    println!("⚠️ ICE完成通知发送失败");
+                    log::debug!("⚠️ ICE完成通知发送失败");
                 }
             }
             
@@ -415,7 +415,7 @@ impl WebRTCClient {
         let client_id_clone = self.client_id.clone();
         
         tokio::spawn(async move {
-            println!("⏳ 等待ICE候选收集完成...");
+            log::debug!("⏳ 等待ICE候选收集完成...");
             
             // 设置超时保护
             let timeout_duration = tokio::time::Duration::from_secs(10);
@@ -427,13 +427,13 @@ impl WebRTCClient {
             
             match result {
                 Ok(Some(())) => {
-                    println!("✅ ICE候选收集完成，准备发送Answer");
+                    log::debug!("✅ ICE候选收集完成，准备发送Answer");
                 }
                 Ok(None) => {
-                    println!("⚠️ ICE收集通道已关闭");
+                    log::debug!("⚠️ ICE收集通道已关闭");
                 }
                 Err(_) => {
-                    println!("⚠️ ICE候选收集超时(10s)，强制发送Answer");
+                    log::debug!("⚠️ ICE候选收集超时(10s)，强制发送Answer");
                 }
             }
             
@@ -442,17 +442,17 @@ impl WebRTCClient {
                 // 分析SDP内容
                 let analysis = Self::analyze_sdp(&local_desc.sdp);
                 
-                println!("📋 最终Answer SDP分析:");
-                println!("   🧊 ICE候选总数: {}", analysis.total_candidates);
-                println!("   🏠 Host候选: {}", analysis.host_candidates);
-                println!("   🌐 Srflx候选: {}", analysis.srflx_candidates);
-                println!("   🔄 Relay候选: {}", analysis.relay_candidates);
-                println!("   🔧 DTLS Setup: {}", analysis.dtls_setup);
+                log::debug!("📋 最终Answer SDP分析:");
+                log::debug!("   🧊 ICE候选总数: {}", analysis.total_candidates);
+                log::debug!("   🏠 Host候选: {}", analysis.host_candidates);
+                log::debug!("   🌐 Srflx候选: {}", analysis.srflx_candidates);
+                log::debug!("   🔄 Relay候选: {}", analysis.relay_candidates);
+                log::debug!("   🔧 DTLS Setup: {}", analysis.dtls_setup);
                 
                 // 如果没有候选但ICE状态是Complete，可能是webrtc-rs的bug
                 if analysis.total_candidates == 0 {
-                    println!("⚠️ 警告: SDP中没有ICE候选，这可能是webrtc-rs的已知问题");
-                    println!("💡 建议: 检查ICE服务器配置或网络连接");
+                    log::warn!("⚠️ 警告: SDP中没有ICE候选，这可能是webrtc-rs的已知问题");
+                    log::warn!("💡 建议: 检查ICE服务器配置或网络连接");
                 }
                 
                 // 发送包含ICE候选的Answer
@@ -466,18 +466,18 @@ impl WebRTCClient {
                 
                 match signaling_tx_clone.send(answer_msg) {
                     Ok(_) => {
-                        println!("📤 WebRTC Answer发送成功 (包含{}个ICE候选)", analysis.total_candidates);
+                        log::info!("📤 WebRTC Answer发送成功 (包含{}个ICE候选)", analysis.total_candidates);
                     }
                     Err(e) => {
-                        println!("❌ Answer发送失败: {}", e);
+                        log::error!("❌ Answer发送失败: {}", e);
                     }
                 }
             } else {
-                println!("❌ 无法获取本地描述，Answer发送失败");
+                log::error!("❌ 无法获取本地描述，Answer发送失败");
             }
         });
         
-        println!("🎯 WebRTC连接协商已启动，等待ICE候选收集...");
+        log::info!("🎯 WebRTC连接协商已启动，等待ICE候选收集...");
         Ok(())
     }
     
@@ -517,13 +517,13 @@ impl WebRTCClient {
         
         // 提取ICE候选的类型和地址信息用于调试
         if candidate_str.contains("typ host") {
-            println!("🏠 添加Host候选: {}", candidate_str);
+            log::debug!("🏠 添加Host候选: {}", candidate_str);
         } else if candidate_str.contains("typ srflx") {
-            println!("🌐 添加Srflx候选: {}", candidate_str);
+            log::debug!("🌐 添加Srflx候选: {}", candidate_str);
         } else if candidate_str.contains("typ relay") {
-            println!("🔄 添加Relay候选: {}", candidate_str);
+            log::debug!("🔄 添加Relay候选: {}", candidate_str);
         } else {
-            println!("🧊 添加未知类型候选: {}", candidate_str);
+            log::debug!("🧊 添加未知类型候选: {}", candidate_str);
         }
         
         let candidate = RTCIceCandidateInit {
@@ -535,11 +535,11 @@ impl WebRTCClient {
         
         match self.peer_connection.add_ice_candidate(candidate).await {
             Ok(_) => {
-                println!("✅ ICE候选添加成功: mid={:?}, mline_index={:?}", 
+                log::debug!("✅ ICE候选添加成功: mid={:?}, mline_index={:?}", 
                     ice_candidate.sdp_mid, ice_candidate.sdp_mline_index);
             }
             Err(e) => {
-                println!("❌ ICE候选添加失败: {} - 候选: {}", e, candidate_str);
+                log::error!("❌ ICE候选添加失败: {} - 候选: {}", e, candidate_str);
                 return Err(e.into());
             }
         }
@@ -570,17 +570,17 @@ impl WebRTCClient {
                     // 数据较小，直接发送
                     match data_channel.send(&bytes.into()).await {
                         Ok(_) => {
-                            println!("📤 通过WebRTC发送屏幕数据: {}x{}, 数据大小: {} bytes", 
+                            log::debug!("📤 通过WebRTC发送屏幕数据: {}x{}, 数据大小: {} bytes", 
                                 screen_data.width, screen_data.height, total_size);
                         }
                         Err(e) => {
-                            println!("❌ 通过WebRTC发送屏幕数据失败: {}", e);
+                            log::error!("❌ 通过WebRTC发送屏幕数据失败: {}", e);
                             return Err(e.into());
                         }
                     }
                 } else {
                     // 数据太大，需要分片发送
-                    println!("📦 数据过大({} bytes)，开始分片发送...", total_size);
+                    log::debug!("📦 数据过大({} bytes)，开始分片发送...", total_size);
                     
                     // 根据RFC 8831第6.6节：没有消息交错支持时，发送方应该将最大消息大小限制为16KB
                     // "As long as message interleaving is not supported, the sender SHOULD limit 
@@ -609,13 +609,13 @@ impl WebRTCClient {
                     let avg_data_per_chunk = total_size / total_chunks;
                     let remainder = total_size % total_chunks;
                     
-                    println!("📏 分片计算 (RFC 8831标准):");
-                    println!("   - RFC推荐最大消息大小: {} bytes (16KB)", MAX_SAFE_MESSAGE_SIZE);
-                    println!("   - 协议头开销: {} bytes", header_overhead);
-                    println!("   - 安全余量: {} bytes", safety_margin);
-                    println!("   - 每片净数据空间: {} bytes", net_data_per_chunk);
-                    println!("   - 总分片数: {}", total_chunks);
-                    println!("   - 平均每片数据: {} bytes", avg_data_per_chunk);
+                    log::debug!("📏 分片计算 (RFC 8831标准):");
+                    log::debug!("   - RFC推荐最大消息大小: {} bytes (16KB)", MAX_SAFE_MESSAGE_SIZE);
+                    log::debug!("   - 协议头开销: {} bytes", header_overhead);
+                    log::debug!("   - 安全余量: {} bytes", safety_margin);
+                    log::debug!("   - 每片净数据空间: {} bytes", net_data_per_chunk);
+                    log::debug!("   - 总分片数: {}", total_chunks);
+                    log::debug!("   - 平均每片数据: {} bytes", avg_data_per_chunk);
                     
                     // 生成唯一的消息ID
                     let message_id = format!("{}", std::time::SystemTime::now()
@@ -653,11 +653,11 @@ impl WebRTCClient {
                         let header_bytes = header_json.as_bytes();
                         
                         // 🔧 增强调试：详细打印分片信息
-                        println!("🔍 分片 {}/{} 详细信息:", chunk_index + 1, total_chunks);
-                        println!("   📋 头部JSON: {}", header_json);
-                        println!("   📏 头部长度: {} bytes", header_bytes.len());
-                        println!("   📦 数据偏移: {} - {}", offset, end_offset);
-                        println!("   📊 数据大小: {} bytes", actual_chunk_size);
+                        log::debug!("🔍 分片 {}/{} 详细信息:", chunk_index + 1, total_chunks);
+                        log::debug!("   📋 头部JSON: {}", header_json);
+                        log::debug!("   📏 头部长度: {} bytes", header_bytes.len());
+                        log::debug!("   📦 数据偏移: {} - {}", offset, end_offset);
+                        log::debug!("   📊 数据大小: {} bytes", actual_chunk_size);
                         
                         // 构建完整的分片消息：[2字节头长度][头数据][分片数据]
                         let header_len = header_bytes.len() as u16;
@@ -669,25 +669,25 @@ impl WebRTCClient {
                         let total_chunk_size = chunk_message.len();
                         
                         // 🔧 增强调试：验证分片格式
-                        println!("   🔧 头长度字节: {:?}", header_len.to_le_bytes());
-                        println!("   📐 总分片大小: {} bytes (头长度: 2, 头数据: {}, 分片数据: {})", 
+                        log::debug!("   🔧 头长度字节: {:?}", header_len.to_le_bytes());
+                        log::debug!("   📐 总分片大小: {} bytes (头长度: 2, 头数据: {}, 分片数据: {})", 
                             total_chunk_size, header_bytes.len(), chunk_data.len());
                         
                         // 🔧 数据完整性检查
                         if chunk_data.len() != actual_chunk_size {
-                            println!("❌ 数据大小不匹配！期望: {}, 实际: {}", actual_chunk_size, chunk_data.len());
+                            log::error!("❌ 数据大小不匹配！期望: {}, 实际: {}", actual_chunk_size, chunk_data.len());
                             return Err(anyhow::anyhow!("数据大小不匹配"));
                         }
                         
                         // 发送分片
                         match data_channel.send(&chunk_message.into()).await {
                             Ok(_) => {
-                                println!("📤 分片 {}/{} 发送成功 (总: {} bytes，头: {} bytes，数据: {} bytes)", 
+                                log::debug!("📤 分片 {}/{} 发送成功 (总: {} bytes，头: {} bytes，数据: {} bytes)", 
                                     chunk_index + 1, total_chunks, total_chunk_size, 
                                     2 + header_bytes.len(), chunk_data.len());
                             }
                             Err(e) => {
-                                println!("❌ 分片 {}/{} 发送失败: {}", chunk_index + 1, total_chunks, e);
+                                log::error!("❌ 分片 {}/{} 发送失败: {}", chunk_index + 1, total_chunks, e);
                                 return Err(e.into());
                             }
                         }
@@ -700,7 +700,7 @@ impl WebRTCClient {
                         }
                     }
                     
-                    println!("✅ 分片发送完成: {} 个分片，总大小: {} bytes", total_chunks, total_size);
+                    log::debug!("✅ 分片发送完成: {} 个分片，总大小: {} bytes", total_chunks, total_size);
                 }
             } else {
                 // 数据通道存在但未就绪，静默返回
@@ -715,7 +715,7 @@ impl WebRTCClient {
     
     /// 关闭WebRTC连接
     pub async fn close(&self) -> Result<()> {
-        println!("🔐 关闭WebRTC连接");
+        log::info!("🔐 关闭WebRTC连接");
         self.peer_connection.close().await?;
         Ok(())
     }
@@ -727,11 +727,11 @@ async fn handle_data_channel_message(_data_channel: Arc<RTCDataChannel>, msg: Da
         if let Ok(message) = serde_json::from_str::<WebSocketMessage>(&text) {
             match message {
                 WebSocketMessage::MouseEvent(mouse_event) => {
-                    println!("🖱️ 通过WebRTC收到鼠标事件: {:?}", mouse_event);
+                    log::debug!("🖱️ 通过WebRTC收到鼠标事件: {:?}", mouse_event);
                     // TODO: 处理鼠标事件
                 }
                 WebSocketMessage::KeyboardEvent(keyboard_event) => {
-                    println!("⌨️ 通过WebRTC收到键盘事件: {:?}", keyboard_event);
+                    log::debug!("⌨️ 通过WebRTC收到键盘事件: {:?}", keyboard_event);
                     // TODO: 处理键盘事件
                 }
                 _ => {}
@@ -757,7 +757,7 @@ fn parse_and_format_candidate(candidate_str: &str) -> String {
         
         // 如果解析失败（返回空字符串），跳过该候选
         if ip.is_empty() || port.is_empty() {
-            println!("⚠️ 跳过无效的ICE候选: {}", candidate_str);
+            log::debug!("⚠️ 跳过无效的ICE候选: {}", candidate_str);
             return String::new(); // 返回空字符串，让上层跳过
         }
         
@@ -810,14 +810,14 @@ fn parse_and_format_candidate(candidate_str: &str) -> String {
                 }
             };
             
-            println!("🔧 标准SDP候选: {}", candidate_format);
+            log::debug!("🔧 标准SDP候选: {}", candidate_format);
             candidate_format
         } else {
-            println!("⚠️ 无效的端口号: {}, 跳过候选", port);
+            log::debug!("⚠️ 无效的端口号: {}, 跳过候选", port);
             String::new() // 返回空字符串，让上层跳过
         }
     } else {
-        println!("⚠️ 候选格式不正确: {}, 跳过", candidate_str);
+        log::debug!("⚠️ 候选格式不正确: {}, 跳过", candidate_str);
         String::new()
     }
 }
@@ -839,7 +839,7 @@ fn generate_standard_foundation(ip: &str, candidate_type: &str, transport: &str)
 
 /// 解析地址:端口字符串，处理各种格式，包括webrtc-rs的bug格式
 fn parse_address_port(address_port: &str) -> (String, String) {
-    println!("🔍 解析地址:端口: {}", address_port);
+    log::debug!("🔍 解析地址:端口: {}", address_port);
     
     // 处理webrtc-rs的IPv4 bug: "121.227.207.147:502480.0.0.0"
     // 正确端口应该是50248，不是502480.0.0.0
@@ -855,7 +855,7 @@ fn parse_address_port(address_port: &str) -> (String, String) {
                 if port_with_extra.len() >= 5 {
                     let port = &port_with_extra[..5]; // 大多数端口是5位或更少
                     if port.chars().all(|c| c.is_ascii_digit()) {
-                        println!("🔨 修复webrtc-rs IPv4 bug: {} -> {}:{}", address_port, ip, port);
+                        log::debug!("🔨 修复webrtc-rs IPv4 bug: {} -> {}:{}", address_port, ip, port);
                         return (ip.to_string(), port.to_string());
                     }
                 }
@@ -871,7 +871,7 @@ fn parse_address_port(address_port: &str) -> (String, String) {
             let potential_port = &without_double_colon[last_colon_pos + 1..];
             if potential_port.chars().all(|c| c.is_ascii_digit()) && potential_port.len() <= 5 {
                 let ip_part = &without_double_colon[..last_colon_pos];
-                println!("🔨 修复webrtc-rs IPv6 bug: {} -> IPv6 {}:{}", address_port, ip_part, potential_port);
+                                    log::debug!("🔨 修复webrtc-rs IPv6 bug: {} -> IPv6 {}:{}", address_port, ip_part, potential_port);
                 return (ip_part.to_string(), potential_port.to_string()); // 不加方括号，让webrtc-rs库自己处理
             }
         }
@@ -898,6 +898,6 @@ fn parse_address_port(address_port: &str) -> (String, String) {
     }
     
     // 如果所有解析都失败，返回空字符串让上层跳过
-    println!("⚠️ 无法解析地址:端口 {}, 跳过该候选", address_port);
+    log::debug!("⚠️ 无法解析地址:端口 {}, 跳过该候选", address_port);
     ("".to_string(), "".to_string()) // 返回空字符串，让上层跳过
 } 

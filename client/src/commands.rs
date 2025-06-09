@@ -59,7 +59,7 @@ pub async fn start_remote_service(
     
     let handle = tokio::spawn(async move {
         if let Err(e) = network::run_remote_service(app_state, service_app).await {
-            eprintln!("远程控制服务错误: {}", e);
+            log::error!("远程控制服务错误: {}", e);
         }
     });
     

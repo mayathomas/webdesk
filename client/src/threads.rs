@@ -11,7 +11,7 @@ pub fn screen_capture_thread(
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ThreadControlSignal>,
     screen_tx: tokio::sync::mpsc::UnboundedSender<WebSocketMessage>,
 ) -> Result<()> {
-    println!("📷 屏幕捕获线程已启动 (RustDesk架构 + JPEG压缩 + 差分编码)");
+    log::debug!("📷 屏幕捕获线程已启动 (RustDesk架构 + JPEG压缩 + 差分编码)");
     
     let mut capturer = ScreenCaptureService::create_capturer()?;
     let mut screen_service = ScreenCaptureService::new();
@@ -27,11 +27,11 @@ pub fn screen_capture_thread(
         if let Ok(signal) = control_rx.try_recv() {
             match signal {
                 ThreadControlSignal::Start => {
-                    println!("📷 屏幕捕获开始 (优化模式)");
+                    log::debug!("📷 屏幕捕获开始 (优化模式)");
                     active = true;
                 }
                 ThreadControlSignal::Stop => {
-                    println!("📷 屏幕捕获停止");
+                    log::debug!("📷 屏幕捕获停止");
                     break;
                 }
             }
@@ -55,28 +55,28 @@ pub fn screen_capture_thread(
                     });
                     
                     if screen_tx.send(screen_data).is_err() {
-                        println!("❌ 发送屏幕数据到主线程失败，主线程可能已断开");
+                        log::debug!("❌ 发送屏幕数据到主线程失败，主线程可能已断开");
                         break;
                     }
                     
                     // 详细日志输出
                     if full_frame {
-                        println!("📷 发送完整帧: {}x{} ({})", width, height, log_format);
+                        log::debug!("📷 发送完整帧: {}x{} ({})", width, height, log_format);
                     } else if log_regions_count > 0 {
-                        println!("📷 发送差分数据: {} 个变化区域", log_regions_count);
+                        log::debug!("📷 发送差分数据: {} 个变化区域", log_regions_count);
                     } else {
                         // 每10次无变化才打印一次，避免日志垃圾
                         let mut no_change_count: u32 = 0;
                         no_change_count += 1;
                         if no_change_count % 10 == 0 {
-                            println!("📷 连续{}次无屏幕变化", no_change_count);
+                            log::debug!("📷 连续{}次无屏幕变化", no_change_count);
                         }
                     }
                     
                     last_capture = std::time::Instant::now();
                 }
                 Err(e) => {
-                    eprintln!("📷 屏幕捕获失败: {}", e);
+                    log::error!("📷 屏幕捕获失败: {}", e);
                 }
             }
         }
@@ -85,7 +85,7 @@ pub fn screen_capture_thread(
         std::thread::sleep(Duration::from_millis(2)); // 从5ms减少到2ms，更快的控制循环
     }
     
-    println!("📷 屏幕捕获线程已停止");
+    log::debug!("📷 屏幕捕获线程已停止");
     Ok(())
 }
 
@@ -95,7 +95,7 @@ pub async fn input_event_thread(
     mut input_rx: tokio::sync::mpsc::UnboundedReceiver<WebSocketMessage>,
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ThreadControlSignal>,
 ) {
-    println!("🎮 输入事件处理线程已启动 (RustDesk架构)");
+    log::debug!("🎮 输入事件处理线程已启动 (RustDesk架构)");
     
     let mut active = false;
     
@@ -105,11 +105,11 @@ pub async fn input_event_thread(
             Some(signal) = control_rx.recv() => {
                 match signal {
                     ThreadControlSignal::Start => {
-                        println!("🎮 输入事件处理开始");
+                        log::debug!("🎮 输入事件处理开始");
                         active = true;
                     }
                     ThreadControlSignal::Stop => {
-                        println!("🎮 输入事件处理停止");
+                        log::debug!("🎮 输入事件处理停止");
                         break;
                     }
                 }
@@ -134,7 +134,7 @@ pub async fn input_event_thread(
         }
     }
     
-    println!("🎮 输入事件处理线程已停止");
+    log::debug!("🎮 输入事件处理线程已停止");
 }
 
 /// 处理鼠标事件
@@ -144,18 +144,18 @@ fn handle_mouse_event(mouse_event: MouseEvent, input_controller: &InputControlle
             if let Err(e) =
                 input_controller.click_mouse(mouse_event.x, mouse_event.y, &mouse_event.button)
             {
-                eprintln!("❌ 鼠标点击失败: {}", e);
+                log::error!("❌ 鼠标点击失败: {}", e);
             }
         }
         "move" => {
             if let Err(e) = input_controller.move_mouse(mouse_event.x, mouse_event.y) {
-                eprintln!("❌ 鼠标移动失败: {}", e);
+                log::error!("❌ 鼠标移动失败: {}", e);
             }
         }
         "scroll" => {
             if let Some(delta) = mouse_event.scroll_delta {
                 if let Err(e) = input_controller.scroll_mouse(mouse_event.x, mouse_event.y, delta) {
-                    eprintln!("❌ 鼠标滚轮失败: {}", e);
+                    log::error!("❌ 鼠标滚轮失败: {}", e);
                 }
             }
         }
@@ -168,12 +168,12 @@ fn handle_keyboard_event(keyboard_event: KeyboardEvent, input_controller: &Input
     match keyboard_event.event_type.as_str() {
         "press" => {
             if let Err(e) = input_controller.press_key(&keyboard_event.key) {
-                eprintln!("❌ 按键按下失败: {}", e);
+                log::error!("❌ 按键按下失败: {}", e);
             }
         }
         "release" => {
             if let Err(e) = input_controller.release_key(&keyboard_event.key) {
-                eprintln!("❌ 按键释放失败: {}", e);
+                log::error!("❌ 按键释放失败: {}", e);
             }
         }
         _ => {}

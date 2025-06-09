@@ -54,9 +54,9 @@ impl ScreenCaptureService {
         
         // 调试：输出分辨率信息（仅首次）
         if self.frame_count == 0 {
-            println!("📊 原始分辨率: {}x{} ({:.1}MP)", original_width, original_height, (original_width * original_height) as f64 / 1_000_000.0);
+            log::debug!("📊 原始分辨率: {}x{} ({:.1}MP)", original_width, original_height, (original_width * original_height) as f64 / 1_000_000.0);
             let estimated_size = (original_width * original_height * 3) as f64 / 1_000_000.0; // RGB估算
-            println!("📊 估算未压缩大小: {:.1}MB", estimated_size);
+            log::debug!("📊 估算未压缩大小: {:.1}MB", estimated_size);
         }
         
         // 捕获原始帧数据
@@ -90,7 +90,7 @@ impl ScreenCaptureService {
 
         // 性能统计（每10帧输出一次）
         if self.frame_count % 10 == 0 {
-            println!("⏱️ 性能统计 - 捕获: {:?}, 转换: {:?}, 缩放: {:?}, 总计: {:?}", 
+            log::debug!("⏱️ 性能统计 - 捕获: {:?}, 转换: {:?}, 缩放: {:?}, 总计: {:?}", 
                 capture_time, convert_time, scale_time, start_time.elapsed());
         }
 
@@ -178,7 +178,7 @@ impl ScreenCaptureService {
             let scale_factor = (MAX_PIXELS as f64 / total_pixels as f64).sqrt();
             let new_width = (width as f64 * scale_factor) as u32;
             let new_height = (height as f64 * scale_factor) as u32;
-            println!("📏 自动缩放: {}*{}像素 -> {}*{}像素 (缩放比例: {:.2})", width, height, new_width, new_height, scale_factor);
+            log::debug!("📏 自动缩放: {}*{}像素 -> {}*{}像素 (缩放比例: {:.2})", width, height, new_width, new_height, scale_factor);
             (new_width, new_height)
         } else {
             (width, height)
@@ -333,10 +333,10 @@ impl ScreenCaptureService {
         
         // 需要缩放，仅在首次缩放时打印信息
         if self.frame_count == 0 {
-            println!("📏 自动缩放帧: {}x{} -> {}x{} (减少 {:.1}% 像素)", 
+            log::debug!("📏 自动缩放帧: {}x{} -> {}x{} (减少 {:.1}% 像素)", 
                 width, height, target_width, target_height,
                 (1.0 - (target_width * target_height) as f64 / (width * height) as f64) * 100.0);
-            println!("🚀 使用业界顶尖的并行批处理算法");
+            log::debug!("🚀 使用业界顶尖的并行批处理算法");
         }
         
         // 计算缩放参数
