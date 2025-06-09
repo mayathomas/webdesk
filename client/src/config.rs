@@ -15,7 +15,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            server_url: "ws://127.0.0.1:3000/ws".to_string(),
+            server_url: "ws://0.0.0.0:3000/ws".to_string(),
             client_id: None,
             auth_code: generate_auth_code(),
         }
@@ -45,12 +45,6 @@ impl ClientConfig {
             let config = Self::default();
             Ok(config)
         }
-    }
-
-    /// 保存配置文件（暂时保留兼容性，实际会更新webrtc-config.yaml）
-    pub fn save(&self) -> Result<()> {
-        println!("📝 配置现在统一管理在 webrtc-config.yaml 中");
-        Ok(())
     }
 
     /// 更新客户端ID

@@ -97,17 +97,11 @@ impl WebRTCClient {
         
         println!("📋 ICE服务器配置完成: {} 个STUN服务器", ice_servers.len());
         
-        // 创建PeerConnection，使用更宽松的配置
+        // 创建PeerConnection
         let peer_connection = Arc::new(api.new_peer_connection(RTCConfiguration {
             ice_servers,
             ice_candidate_pool_size: 10,
-            // 🔧 强制中继模式测试
-            ice_transport_policy: webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy::Relay,
-            bundle_policy: webrtc::peer_connection::policy::bundle_policy::RTCBundlePolicy::MaxBundle,
-            rtcp_mux_policy: webrtc::peer_connection::policy::rtcp_mux_policy::RTCRtcpMuxPolicy::Require,
-            // 🔧 关键修复: DTLS角色问题
-            // 当客户端作为Answer方时，应该让浏览器（Offer方）决定DTLS角色
-            // 这样可以避免两边都尝试当DTLS服务端的冲突
+            ice_transport_policy: webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy::All,
             ..Default::default()
         }).await?);
         
