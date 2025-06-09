@@ -251,13 +251,7 @@ impl WebRTCClient {
                                 println!("      {}: {}", i+1, candidate);
                             }
                         }
-                        
-                        // 🔧 webrtc-rs强制中继模式可能的问题诊断
-                        println!("🩺 可能的问题诊断:");
-                        println!("   1. webrtc-rs在强制中继模式下可能无法正确处理ICE连通性检查");
-                        println!("   2. TURN服务器的relay候选可能无法建立双向连接");
-                        println!("   3. ICE候选对匹配算法在中继模式下可能有bug");
-                        println!("   4. DTLS握手可能在relay连接上失败");
+
                     });
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Disconnected => {
@@ -658,6 +652,13 @@ impl WebRTCClient {
                         let header_json = serde_json::to_string(&chunk_header)?;
                         let header_bytes = header_json.as_bytes();
                         
+                        // 🔧 增强调试：详细打印分片信息
+                        println!("🔍 分片 {}/{} 详细信息:", chunk_index + 1, total_chunks);
+                        println!("   📋 头部JSON: {}", header_json);
+                        println!("   📏 头部长度: {} bytes", header_bytes.len());
+                        println!("   📦 数据偏移: {} - {}", offset, end_offset);
+                        println!("   📊 数据大小: {} bytes", actual_chunk_size);
+                        
                         // 构建完整的分片消息：[2字节头长度][头数据][分片数据]
                         let header_len = header_bytes.len() as u16;
                         let mut chunk_message = Vec::with_capacity(2 + header_bytes.len() + chunk_data.len());
@@ -667,11 +668,15 @@ impl WebRTCClient {
                         
                         let total_chunk_size = chunk_message.len();
                         
-                        // 验证分片大小
-                        if total_chunk_size > MAX_SAFE_MESSAGE_SIZE {
-                            println!("❌ 分片 {}/{} 仍然过大 ({} > {} bytes)，算法需要调整", 
-                                chunk_index + 1, total_chunks, total_chunk_size, MAX_SAFE_MESSAGE_SIZE);
-                            return Err(anyhow::anyhow!("分片算法错误"));
+                        // 🔧 增强调试：验证分片格式
+                        println!("   🔧 头长度字节: {:?}", header_len.to_le_bytes());
+                        println!("   📐 总分片大小: {} bytes (头长度: 2, 头数据: {}, 分片数据: {})", 
+                            total_chunk_size, header_bytes.len(), chunk_data.len());
+                        
+                        // 🔧 数据完整性检查
+                        if chunk_data.len() != actual_chunk_size {
+                            println!("❌ 数据大小不匹配！期望: {}, 实际: {}", actual_chunk_size, chunk_data.len());
+                            return Err(anyhow::anyhow!("数据大小不匹配"));
                         }
                         
                         // 发送分片

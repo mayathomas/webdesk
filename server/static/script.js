@@ -311,11 +311,32 @@ function setupDataChannel(channel) {
     channel.onmessage = function(event) {
         // 处理来自客户端的屏幕数据
         try {
-            // 检查是否是分片数据
             if (event.data instanceof ArrayBuffer) {
-                handleChunkedMessage(event.data);
+                // 判断是否是分片数据格式
+                if (isChunkedMessage(event.data)) {
+                    // 分片数据处理
+                    handleChunkedMessage(event.data);
+                } else {
+                    // 尝试解析为JSON
+                    try {
+                        const jsonText = new TextDecoder().decode(event.data);
+                        const message = JSON.parse(jsonText);
+                        console.log('📥 收到WebRTC数据通道消息，类型:', message.type);
+                        
+                        if (message.type === 'ScreenData') {
+                            console.log('🖼️ 处理屏幕数据:', message.width + 'x' + message.height);
+                            handleScreenData(message);
+                        } else {
+                            console.log('🔍 未知的数据通道消息类型:', message.type);
+                        }
+                    } catch (jsonError) {
+                        // 不是JSON，可能是其他二进制数据（如截图）
+                        console.log('📊 收到非JSON ArrayBuffer数据，大小:', event.data.byteLength);
+                        // 这里可以添加处理其他类型二进制数据的逻辑
+                    }
+                }
             } else {
-                // 原有的JSON消息处理
+                // 原有的字符串消息处理
                 const message = JSON.parse(event.data);
                 console.log('📥 收到WebRTC数据通道消息，类型:', message.type);
                 
@@ -751,21 +772,91 @@ function resetUI() {
     signalingSocket = null;
 }
 
-// 处理分片消息
-function handleChunkedMessage(arrayBuffer) {
+// 判断是否是分片消息格式
+function isChunkedMessage(arrayBuffer) {
     try {
-        const dataView = new DataView(arrayBuffer);
+        // 检查最小长度：至少需要2字节头长度 + 一些头数据
+        if (arrayBuffer.byteLength < 4) {
+            return false;
+        }
         
-        // 读取头长度（前2字节）
+        const dataView = new DataView(arrayBuffer);
         const headerLength = dataView.getUint16(0, true); // little-endian
         
-        // 读取头数据
+        // 检查头长度是否合理
+        if (headerLength <= 0 || headerLength > 1000 || headerLength >= arrayBuffer.byteLength) {
+            return false;
+        }
+        
+        // 检查是否有足够的数据包含头部
+        if (arrayBuffer.byteLength < 2 + headerLength) {
+            return false;
+        }
+        
+        // 尝试解析头部JSON
         const headerBytes = new Uint8Array(arrayBuffer, 2, headerLength);
         const headerText = new TextDecoder().decode(headerBytes);
         const chunkHeader = JSON.parse(headerText);
         
+        // 检查是否包含分片所需的字段
+        return chunkHeader.hasOwnProperty('chunk_index') && 
+               chunkHeader.hasOwnProperty('total_chunks') && 
+               chunkHeader.hasOwnProperty('message_id') &&
+               chunkHeader.hasOwnProperty('total_size');
+    } catch (error) {
+        // 解析失败，不是分片格式
+        return false;
+    }
+}
+
+// 处理分片消息
+function handleChunkedMessage(arrayBuffer) {
+    try {
+        console.log(`🔍 开始处理分片消息，原始数据大小: ${arrayBuffer.byteLength} bytes`);
+        
+        const dataView = new DataView(arrayBuffer);
+        
+        // 🔧 增强调试：详细打印原始数据
+        console.log('📋 原始数据前16字节:', Array.from(new Uint8Array(arrayBuffer, 0, Math.min(16, arrayBuffer.byteLength))).map(b => b.toString(16).padStart(2, '0')).join(' '));
+        
+        // 读取头长度（前2字节）
+        if (arrayBuffer.byteLength < 2) {
+            console.error('❌ 数据太短，无法读取头长度');
+            return;
+        }
+        
+        const headerLength = dataView.getUint16(0, true); // little-endian
+        console.log(`📏 解析头长度: ${headerLength} bytes (原始字节: [${dataView.getUint8(0)}, ${dataView.getUint8(1)}])`);
+        
+        // 🔧 验证头长度是否合理
+        if (headerLength <= 0 || headerLength > 1000) {
+            console.error(`❌ 头长度异常: ${headerLength}, 可能数据损坏`);
+            console.error('🔍 完整原始数据:', Array.from(new Uint8Array(arrayBuffer)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            return;
+        }
+        
+        // 验证数据完整性
+        if (arrayBuffer.byteLength < 2 + headerLength) {
+            console.error(`❌ 数据不完整，期望: ${2 + headerLength} bytes, 实际: ${arrayBuffer.byteLength} bytes`);
+            return;
+        }
+        
+        // 读取头数据
+        console.log(`📦 准备读取头数据，偏移: 2, 长度: ${headerLength}`);
+        const headerBytes = new Uint8Array(arrayBuffer, 2, headerLength);
+        const headerText = new TextDecoder().decode(headerBytes);
+        console.log(`📋 头部原始文本: ${headerText}`);
+        
+        const chunkHeader = JSON.parse(headerText);
+        console.log(`✅ 解析的分片头:`, chunkHeader);
+        
         // 读取分片数据
-        const chunkData = new Uint8Array(arrayBuffer, 2 + headerLength);
+        const chunkDataOffset = 2 + headerLength;
+        const chunkDataLength = arrayBuffer.byteLength - chunkDataOffset;
+        console.log(`📦 准备读取分片数据，偏移: ${chunkDataOffset}, 长度: ${chunkDataLength}`);
+        
+        const chunkData = new Uint8Array(arrayBuffer, chunkDataOffset);
+        console.log(`📊 实际分片数据大小: ${chunkData.length} bytes`);
         
         console.log(`📦 收到分片 ${chunkHeader.chunk_index + 1}/${chunkHeader.total_chunks}，头部: ${headerLength} bytes，数据: ${chunkData.length} bytes`);
         
