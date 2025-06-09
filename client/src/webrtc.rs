@@ -19,6 +19,21 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use crate::types::*;
 use serde_json;
 
+/// SDP分析结果
+#[derive(Debug, Default)]
+struct SdpAnalysis {
+    /// ICE候选总数
+    total_candidates: usize,
+    /// Host候选数量
+    host_candidates: usize,
+    /// Srflx候选数量  
+    srflx_candidates: usize,
+    /// Relay候选数量
+    relay_candidates: usize,
+    /// DTLS Setup方式
+    dtls_setup: String,
+}
+
 /// WebRTC客户端状态
 #[derive(Clone)]
 pub struct WebRTCClient {
@@ -381,14 +396,32 @@ impl WebRTCClient {
         let offer = RTCSessionDescription::offer(session_description.sdp)?;
         self.peer_connection.set_remote_description(offer).await?;
         
-        // 🔧 关键修复：创建Answer前等待ICE候选收集完成
-        // 这是webrtc-rs的一个已知问题：它在ICE收集完成前就发送Answer
+        // 创建Answer
         let answer = self.peer_connection.create_answer(None).await?;
+        
+        // 🔧 使用正确的事件驱动ICE候选收集
+        // 设置ICE候选收集监听器
+        let (ice_complete_tx, mut ice_complete_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        
+        let ice_complete_tx_clone = ice_complete_tx.clone();
+        self.peer_connection.on_ice_candidate(Box::new(move |candidate| {
+            if let Some(candidate) = candidate {
+                println!("🧊 收集到ICE候选: {}:{} {}", candidate.address, candidate.port, candidate.typ);
+            } else {
+                println!("✅ ICE候选收集完成 (收到null候选)");
+                // 收到null候选表示收集完成
+                if let Err(_) = ice_complete_tx_clone.send(()) {
+                    println!("⚠️ ICE完成通知发送失败");
+                }
+            }
+            
+            Box::pin(async {})
+        }));
         
         // 设置本地描述，这会触发ICE候选收集
         self.peer_connection.set_local_description(answer.clone()).await?;
         
-        // 🔧 关键修复：等待ICE收集完成再发送Answer
+        // 异步等待ICE收集完成并发送Answer
         let peer_connection_clone = self.peer_connection.clone();
         let signaling_tx_clone = self.signaling_tx.clone();
         let client_id_clone = self.client_id.clone();
@@ -396,53 +429,42 @@ impl WebRTCClient {
         tokio::spawn(async move {
             println!("⏳ 等待ICE候选收集完成...");
             
-            // 等待ICE收集状态变为Complete
-            let mut attempts = 0;
-            const MAX_WAIT_TIME_MS: u64 = 10000; // 最大等待10秒
-            const CHECK_INTERVAL_MS: u64 = 100;  // 每100ms检查一次
+            // 设置超时保护
+            let timeout_duration = tokio::time::Duration::from_secs(10);
             
-            while attempts < (MAX_WAIT_TIME_MS / CHECK_INTERVAL_MS) {
-                match peer_connection_clone.ice_gathering_state() {
-                    webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState::Complete => {
-                        println!("✅ ICE候选收集完成，现在发送Answer");
-                        break;
-                    }
-                    state => {
-                        println!("⏳ ICE收集状态: {:?}, 继续等待...", state);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(CHECK_INTERVAL_MS)).await;
-                        attempts += 1;
-                    }
+            let result = tokio::time::timeout(timeout_duration, async {
+                // 等待ICE收集完成信号
+                ice_complete_rx.recv().await
+            }).await;
+            
+            match result {
+                Ok(Some(())) => {
+                    println!("✅ ICE候选收集完成，准备发送Answer");
+                }
+                Ok(None) => {
+                    println!("⚠️ ICE收集通道已关闭");
+                }
+                Err(_) => {
+                    println!("⚠️ ICE候选收集超时(10s)，强制发送Answer");
                 }
             }
             
-            if attempts >= (MAX_WAIT_TIME_MS / CHECK_INTERVAL_MS) {
-                println!("⚠️ ICE候选收集超时，强制发送Answer");
-            }
-            
-            // 现在重新获取包含ICE候选的本地描述
+            // 获取包含ICE候选的最终本地描述
             if let Some(local_desc) = peer_connection_clone.local_description().await {
-                println!("📋 最终Answer SDP (包含ICE候选):");
+                // 分析SDP内容
+                let analysis = Self::analyze_sdp(&local_desc.sdp);
                 
-                // 统计候选数量
-                let candidate_count = local_desc.sdp.matches("a=candidate:").count();
-                println!("   🧊 包含 {} 个ICE候选", candidate_count);
+                println!("📋 最终Answer SDP分析:");
+                println!("   🧊 ICE候选总数: {}", analysis.total_candidates);
+                println!("   🏠 Host候选: {}", analysis.host_candidates);
+                println!("   🌐 Srflx候选: {}", analysis.srflx_candidates);
+                println!("   🔄 Relay候选: {}", analysis.relay_candidates);
+                println!("   🔧 DTLS Setup: {}", analysis.dtls_setup);
                 
-                // 显示重要的SDP行
-                for line in local_desc.sdp.lines() {
-                    if line.contains("setup") || line.contains("fingerprint") || line.contains("candidate:") {
-                        if line.contains("candidate:") {
-                            // 只显示候选类型，不显示完整信息避免日志过长
-                            if line.contains("typ relay") {
-                                println!("   🔄 relay候选: {}", line.split_whitespace().nth(4).unwrap_or("unknown"));
-                            } else if line.contains("typ srflx") {
-                                println!("   🌐 srflx候选: {}", line.split_whitespace().nth(4).unwrap_or("unknown"));
-                            } else if line.contains("typ host") {
-                                println!("   🏠 host候选: {}", line.split_whitespace().nth(4).unwrap_or("unknown"));
-                            }
-                        } else {
-                            println!("   {}", line);
-                        }
-                    }
+                // 如果没有候选但ICE状态是Complete，可能是webrtc-rs的bug
+                if analysis.total_candidates == 0 {
+                    println!("⚠️ 警告: SDP中没有ICE候选，这可能是webrtc-rs的已知问题");
+                    println!("💡 建议: 检查ICE服务器配置或网络连接");
                 }
                 
                 // 发送包含ICE候选的Answer
@@ -454,18 +476,50 @@ impl WebRTCClient {
                     },
                 };
                 
-                if let Err(e) = signaling_tx_clone.send(answer_msg) {
-                    println!("❌ 发送Answer失败: {}", e);
-                } else {
-                    println!("📤 发送包含ICE候选的WebRTC Answer");
+                match signaling_tx_clone.send(answer_msg) {
+                    Ok(_) => {
+                        println!("📤 WebRTC Answer发送成功 (包含{}个ICE候选)", analysis.total_candidates);
+                    }
+                    Err(e) => {
+                        println!("❌ Answer发送失败: {}", e);
+                    }
                 }
             } else {
-                println!("❌ 无法获取本地描述");
+                println!("❌ 无法获取本地描述，Answer发送失败");
             }
         });
         
-        println!("🎯 WebRTC连接协商开始，等待ICE候选收集完成...");
+        println!("🎯 WebRTC连接协商已启动，等待ICE候选收集...");
         Ok(())
+    }
+    
+    /// 分析SDP内容
+    fn analyze_sdp(sdp: &str) -> SdpAnalysis {
+        let mut analysis = SdpAnalysis::default();
+        
+        for line in sdp.lines() {
+            if line.contains("a=candidate:") {
+                analysis.total_candidates += 1;
+                
+                if line.contains("typ host") {
+                    analysis.host_candidates += 1;
+                } else if line.contains("typ srflx") {
+                    analysis.srflx_candidates += 1;
+                } else if line.contains("typ relay") {
+                    analysis.relay_candidates += 1;
+                }
+            } else if line.contains("a=setup:") {
+                if line.contains("active") {
+                    analysis.dtls_setup = "active".to_string();
+                } else if line.contains("passive") {
+                    analysis.dtls_setup = "passive".to_string();
+                } else if line.contains("actpass") {
+                    analysis.dtls_setup = "actpass".to_string();
+                }
+            }
+        }
+        
+        analysis
     }
     
     /// 处理ICE候选

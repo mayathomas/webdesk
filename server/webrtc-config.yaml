@@ -5,15 +5,10 @@ stun_servers:
 
 turn_servers:
   # 我们自己的TURN服务器
-  # - url: "turn:115.159.125.146:3478"
-  # # - url: "turn:127.0.0.1:3478"
-  #   username: "maya"
-  #   credential: "sorrow2713"
-  
-  # 免费TURN服务器选项2: FreeTurn.net (德国，带宽限制)
-  - url: "turn:freestun.net:3478"
-    username: "free"
-    credential: "free"
+  - url: "turn:115.159.125.146:3478"
+  # - url: "turn:127.0.0.1:3478"
+    username: "maya"
+    credential: "sorrow2713"
 
 # WebRTC连接配置
 rtc_config:

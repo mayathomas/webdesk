@@ -312,15 +312,12 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                 // 通过WebRTC数据通道发送屏幕数据
                 if let Some(ref client) = webrtc_client {
                     if let WebSocketMessage::ScreenData(screen_data) = screen_data {
-                        println!("🎬 准备通过WebRTC发送屏幕数据: {}x{}", screen_data.width, screen_data.height);
+                        // 🔧 简化处理：连接断开时send_screen_data会自动返回Ok，不会出错
                         if let Err(e) = client.send_screen_data(&screen_data).await {
-                            println!("❌ 通过WebRTC发送屏幕数据失败: {}", e);
+                            // 只有真正的发送错误才打印，连接状态问题已在send_screen_data中处理
+                            println!("❌ WebRTC发送错误: {}", e);
                         }
-                    } else {
-                        println!("⚠️ 收到非屏幕数据消息: {:?}", std::mem::discriminant(&screen_data));
                     }
-                } else {
-                    println!("⚠️ WebRTC客户端未初始化，无法发送屏幕数据");
                 }
             }
         }
