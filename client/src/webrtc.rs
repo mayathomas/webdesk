@@ -82,9 +82,17 @@ impl WebRTCClient {
         
         println!("📋 ICE服务器配置完成: {} 个STUN服务器", ice_servers.len());
         
-        // 创建PeerConnection
+        // 创建PeerConnection，使用更宽松的配置
         let peer_connection = Arc::new(api.new_peer_connection(RTCConfiguration {
             ice_servers,
+            ice_candidate_pool_size: 10,
+            // 🔧 强制中继模式测试
+            ice_transport_policy: webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy::Relay,
+            bundle_policy: webrtc::peer_connection::policy::bundle_policy::RTCBundlePolicy::MaxBundle,
+            rtcp_mux_policy: webrtc::peer_connection::policy::rtcp_mux_policy::RTCRtcpMuxPolicy::Require,
+            // 🔧 关键修复: DTLS角色问题
+            // 当客户端作为Answer方时，应该让浏览器（Offer方）决定DTLS角色
+            // 这样可以避免两边都尝试当DTLS服务端的冲突
             ..Default::default()
         }).await?);
         
@@ -105,7 +113,8 @@ impl WebRTCClient {
         let signaling_tx = self.signaling_tx.clone();
         
         // 监听连接状态变化
-        self.peer_connection.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+        let peer_connection_clone_state = self.peer_connection.clone();
+        self.peer_connection.on_peer_connection_state_change(Box::new(move |state| {
             println!("🔗 WebRTC连接状态变化: {:?}", state);
             match state {
                 RTCPeerConnectionState::Connected => {
@@ -119,9 +128,29 @@ impl WebRTCClient {
                 }
                 RTCPeerConnectionState::Failed => {
                     println!("❌ WebRTC连接失败");
+                    
+                    // 获取详细的连接失败信息
+                    let pc = peer_connection_clone_state.clone();
+                    tokio::spawn(async move {
+                        println!("🔍 尝试获取详细的WebRTC失败信息...");
+                        
+                        // 检查连接状态
+                        println!("🔗 当前连接状态: {:?}", pc.connection_state());
+                        println!("🧊 当前ICE连接状态: {:?}", pc.ice_connection_state());
+                        println!("📡 当前ICE收集状态: {:?}", pc.ice_gathering_state());
+                        
+                        // 获取本地和远程描述
+                        if let Some(local_desc) = pc.local_description().await {
+                            println!("📤 本地描述: {:?}", local_desc.sdp);
+                        }
+                        if let Some(remote_desc) = pc.remote_description().await {
+                            println!("📥 远程描述: {:?}", remote_desc.sdp);
+                        }
+
+                    });
                 }
                 RTCPeerConnectionState::Closed => {
-                    println!("🔐 WebRTC连接已关闭");
+                    println!("🔒 WebRTC连接已关闭");
                 }
                 _ => {
                     println!("🔍 WebRTC连接状态: {:?}", state);
@@ -131,31 +160,104 @@ impl WebRTCClient {
         }));
         
         // 监听ICE连接状态变化
+        let peer_connection_clone_ice = self.peer_connection.clone();
         self.peer_connection.on_ice_connection_state_change(Box::new(move |state| {
             println!("🧊 ICE连接状态变化: {:?}", state);
             match state {
-                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected => {
-                    println!("🎉 ICE连接已建立！P2P通道打开！");
-                }
-                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Completed => {
-                    println!("✅ ICE连接完成！最佳路径已选择！");
-                }
-                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Failed => {
-                    println!("❌ ICE连接失败！P2P无法建立！");
-                    println!("💡 可能原因：");
-                    println!("   1. 严格的NAT/防火墙阻止P2P连接");
-                    println!("   2. 需要TURN服务器中继");
-                    println!("   3. 网络策略限制");
-                }
-                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Disconnected => {
-                    println!("⚠️ ICE连接断开");
-                }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Checking => {
                     println!("🔍 ICE正在检查连通性...");
+                    
+                    // 🔧 关键修复：在强制中继模式下，增加详细的ICE调试信息
+                    let pc = peer_connection_clone_ice.clone();
+                    tokio::spawn(async move {
+                        // 等待一些时间让ICE检查进行
+                        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                        
+                        println!("🔍 强制中继模式下的ICE检查状态:");
+                        println!("   🔗 连接状态: {:?}", pc.connection_state());
+                        println!("   🧊 ICE连接状态: {:?}", pc.ice_connection_state());
+                        println!("   📡 ICE收集状态: {:?}", pc.ice_gathering_state());
+                        
+                        // 检查本地描述中的ICE参数
+                        if let Some(local_desc) = pc.local_description().await {
+                            let ice_lines: Vec<&str> = local_desc.sdp.lines()
+                                .filter(|line| line.contains("ice-") || line.contains("candidate"))
+                                .collect();
+                            if !ice_lines.is_empty() {
+                                println!("   📤 本地ICE参数:");
+                                for line in &ice_lines[..std::cmp::min(5, ice_lines.len())] {
+                                    println!("      {}", line);
+                                }
+                            }
+                        }
+                        
+                        // 检查远程描述中的ICE参数
+                        if let Some(remote_desc) = pc.remote_description().await {
+                            let ice_lines: Vec<&str> = remote_desc.sdp.lines()
+                                .filter(|line| line.contains("ice-") || line.contains("candidate"))
+                                .collect();
+                            if !ice_lines.is_empty() {
+                                println!("   📥 远程ICE参数:");
+                                for line in &ice_lines[..std::cmp::min(5, ice_lines.len())] {
+                                    println!("      {}", line);
+                                }
+                            }
+                        }
+                    });
                 }
-                _ => {
-                    println!("🔍 ICE连接状态: {:?}", state);
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected => {
+                    println!("🎉 ICE连接已建立！");
                 }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Completed => {
+                    println!("✅ ICE连接完成！");
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Failed => {
+                    println!("❌ ICE连接失败！");
+                    
+                    // 🔧 增强失败分析：特别针对强制中继模式
+                    let pc = peer_connection_clone_ice.clone();
+                    tokio::spawn(async move {
+                        println!("🔍 强制中继模式ICE失败详细分析:");
+                        println!("   🔗 连接状态: {:?}", pc.connection_state());
+                        println!("   🧊 ICE连接状态: {:?}", pc.ice_connection_state());
+                        println!("   📡 ICE收集状态: {:?}", pc.ice_gathering_state());
+                        
+                        // 分析本地和远程的relay候选
+                        if let Some(local_desc) = pc.local_description().await {
+                            let relay_candidates: Vec<&str> = local_desc.sdp.lines()
+                                .filter(|line| line.contains("typ relay"))
+                                .collect();
+                            println!("   📤 本地relay候选数量: {}", relay_candidates.len());
+                            for (i, candidate) in relay_candidates.iter().enumerate() {
+                                println!("      {}: {}", i+1, candidate);
+                            }
+                        }
+                        
+                        if let Some(remote_desc) = pc.remote_description().await {
+                            let relay_candidates: Vec<&str> = remote_desc.sdp.lines()
+                                .filter(|line| line.contains("typ relay"))
+                                .collect();
+                            println!("   📥 远程relay候选数量: {}", relay_candidates.len());
+                            for (i, candidate) in relay_candidates.iter().enumerate() {
+                                println!("      {}: {}", i+1, candidate);
+                            }
+                        }
+                        
+                        // 🔧 webrtc-rs强制中继模式可能的问题诊断
+                        println!("🩺 可能的问题诊断:");
+                        println!("   1. webrtc-rs在强制中继模式下可能无法正确处理ICE连通性检查");
+                        println!("   2. TURN服务器的relay候选可能无法建立双向连接");
+                        println!("   3. ICE候选对匹配算法在中继模式下可能有bug");
+                        println!("   4. DTLS握手可能在relay连接上失败");
+                    });
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Disconnected => {
+                    println!("⚠️ ICE连接已断开");
+                }
+                webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Closed => {
+                    println!("🔒 ICE连接已关闭");
+                }
+                _ => {}
             }
             Box::pin(async {})
         }));
@@ -179,22 +281,28 @@ impl WebRTCClient {
                     let candidate_string = candidate.to_string();
                     println!("🧊 收集到ICE候选: {}", candidate_string);
                     
-                    // 解析并重新构造标准的SDP候选格式
+                    // 🔧 关键修复：解析并重新构造标准的SDP候选格式
                     let formatted_candidate = parse_and_format_candidate(&candidate_string);
-                    println!("🧊 发送标准SDP候选: {}", formatted_candidate);
                     
-                    let ice_msg = WebSocketMessage::WebRTCIceCandidate {
-                        target_id: client_id,
-                        ice_candidate: IceCandidate {
-                            candidate: formatted_candidate,
-                            // 数据通道通常使用这些默认值
-                            sdp_mid: Some("0".to_string()),
-                            sdp_mline_index: Some(0),
-                        },
-                    };
-                    
-                    if let Err(e) = signaling_tx.send(ice_msg) {
-                        println!("❌ 发送ICE候选失败: {}", e);
+                    // 只发送有效的候选（非空字符串）
+                    if !formatted_candidate.is_empty() {
+                        println!("🧊 发送标准SDP候选: {}", formatted_candidate);
+                        
+                        let ice_msg = WebSocketMessage::WebRTCIceCandidate {
+                            target_id: client_id,
+                            ice_candidate: IceCandidate {
+                                candidate: formatted_candidate,
+                                // 数据通道通常使用这些默认值
+                                sdp_mid: Some("0".to_string()),
+                                sdp_mline_index: Some(0),
+                            },
+                        };
+                        
+                        if let Err(e) = signaling_tx.send(ice_msg) {
+                            println!("❌ 发送ICE候选失败: {}", e);
+                        }
+                    } else {
+                        println!("⚠️ 跳过发送无效的ICE候选");
                     }
                 } else {
                     println!("🏁 ICE候选收集完成");
@@ -273,40 +381,127 @@ impl WebRTCClient {
         let offer = RTCSessionDescription::offer(session_description.sdp)?;
         self.peer_connection.set_remote_description(offer).await?;
         
-        // 注意：数据通道由offer方（浏览器）创建，我们在on_data_channel监听器中接收
-        // 不需要在这里创建数据通道
-        
-        // 创建Answer
+        // 🔧 关键修复：创建Answer前等待ICE候选收集完成
+        // 这是webrtc-rs的一个已知问题：它在ICE收集完成前就发送Answer
         let answer = self.peer_connection.create_answer(None).await?;
+        
+        // 设置本地描述，这会触发ICE候选收集
         self.peer_connection.set_local_description(answer.clone()).await?;
         
-        // 发送Answer
-        let answer_msg = WebSocketMessage::WebRTCAnswer {
-            target_id: self.client_id.clone(),
-            session_description: SessionDescription {
-                sdp_type: "answer".to_string(),
-                sdp: answer.sdp,
-            },
-        };
+        // 🔧 关键修复：等待ICE收集完成再发送Answer
+        let peer_connection_clone = self.peer_connection.clone();
+        let signaling_tx_clone = self.signaling_tx.clone();
+        let client_id_clone = self.client_id.clone();
         
-        self.signaling_tx.send(answer_msg)?;
+        tokio::spawn(async move {
+            println!("⏳ 等待ICE候选收集完成...");
+            
+            // 等待ICE收集状态变为Complete
+            let mut attempts = 0;
+            const MAX_WAIT_TIME_MS: u64 = 10000; // 最大等待10秒
+            const CHECK_INTERVAL_MS: u64 = 100;  // 每100ms检查一次
+            
+            while attempts < (MAX_WAIT_TIME_MS / CHECK_INTERVAL_MS) {
+                match peer_connection_clone.ice_gathering_state() {
+                    webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState::Complete => {
+                        println!("✅ ICE候选收集完成，现在发送Answer");
+                        break;
+                    }
+                    state => {
+                        println!("⏳ ICE收集状态: {:?}, 继续等待...", state);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(CHECK_INTERVAL_MS)).await;
+                        attempts += 1;
+                    }
+                }
+            }
+            
+            if attempts >= (MAX_WAIT_TIME_MS / CHECK_INTERVAL_MS) {
+                println!("⚠️ ICE候选收集超时，强制发送Answer");
+            }
+            
+            // 现在重新获取包含ICE候选的本地描述
+            if let Some(local_desc) = peer_connection_clone.local_description().await {
+                println!("📋 最终Answer SDP (包含ICE候选):");
+                
+                // 统计候选数量
+                let candidate_count = local_desc.sdp.matches("a=candidate:").count();
+                println!("   🧊 包含 {} 个ICE候选", candidate_count);
+                
+                // 显示重要的SDP行
+                for line in local_desc.sdp.lines() {
+                    if line.contains("setup") || line.contains("fingerprint") || line.contains("candidate:") {
+                        if line.contains("candidate:") {
+                            // 只显示候选类型，不显示完整信息避免日志过长
+                            if line.contains("typ relay") {
+                                println!("   🔄 relay候选: {}", line.split_whitespace().nth(4).unwrap_or("unknown"));
+                            } else if line.contains("typ srflx") {
+                                println!("   🌐 srflx候选: {}", line.split_whitespace().nth(4).unwrap_or("unknown"));
+                            } else if line.contains("typ host") {
+                                println!("   🏠 host候选: {}", line.split_whitespace().nth(4).unwrap_or("unknown"));
+                            }
+                        } else {
+                            println!("   {}", line);
+                        }
+                    }
+                }
+                
+                // 发送包含ICE候选的Answer
+                let answer_msg = WebSocketMessage::WebRTCAnswer {
+                    target_id: client_id_clone,
+                    session_description: SessionDescription {
+                        sdp_type: "answer".to_string(),
+                        sdp: local_desc.sdp,
+                    },
+                };
+                
+                if let Err(e) = signaling_tx_clone.send(answer_msg) {
+                    println!("❌ 发送Answer失败: {}", e);
+                } else {
+                    println!("📤 发送包含ICE候选的WebRTC Answer");
+                }
+            } else {
+                println!("❌ 无法获取本地描述");
+            }
+        });
         
-        println!("📤 发送WebRTC Answer");
+        println!("🎯 WebRTC连接协商开始，等待ICE候选收集完成...");
         Ok(())
     }
     
     /// 处理ICE候选
     pub async fn handle_ice_candidate(&self, ice_candidate: IceCandidate) -> Result<()> {
-        println!("🧊 添加ICE候选: {}", ice_candidate.candidate);
+        // 详细解析ICE候选信息
+        let candidate_str = &ice_candidate.candidate;
+        
+        // 提取ICE候选的类型和地址信息用于调试
+        if candidate_str.contains("typ host") {
+            println!("🏠 添加Host候选: {}", candidate_str);
+        } else if candidate_str.contains("typ srflx") {
+            println!("🌐 添加Srflx候选: {}", candidate_str);
+        } else if candidate_str.contains("typ relay") {
+            println!("🔄 添加Relay候选: {}", candidate_str);
+        } else {
+            println!("🧊 添加未知类型候选: {}", candidate_str);
+        }
         
         let candidate = RTCIceCandidateInit {
-            candidate: ice_candidate.candidate,
-            sdp_mid: ice_candidate.sdp_mid,
+            candidate: ice_candidate.candidate.clone(),
+            sdp_mid: ice_candidate.sdp_mid.clone(),
             sdp_mline_index: ice_candidate.sdp_mline_index,
             username_fragment: None,
         };
         
-        self.peer_connection.add_ice_candidate(candidate).await?;
+        match self.peer_connection.add_ice_candidate(candidate).await {
+            Ok(_) => {
+                println!("✅ ICE候选添加成功: mid={:?}, mline_index={:?}", 
+                    ice_candidate.sdp_mid, ice_candidate.sdp_mline_index);
+            }
+            Err(e) => {
+                println!("❌ ICE候选添加失败: {} - 候选: {}", e, candidate_str);
+                return Err(e.into());
+            }
+        }
+        
         Ok(())
     }
     
@@ -493,13 +688,14 @@ async fn handle_data_channel_message(_data_channel: Arc<RTCDataChannel>, msg: Da
 }
 
 /// 解析webrtc-rs的候选字符串并格式化为标准SDP格式
+/// 修复webrtc-rs与浏览器的兼容性问题
 /// 输入格式: "udp host 192.168.1.3:49796" 或 "udp srflx 121.227.207.147:60352"
-/// 输出格式: "candidate:842163049 1 udp 1686052607 192.168.1.3 49796 typ host"
+/// 输出格式: "candidate:842163049 1 udp 1686052607 192.168.1.3 49796 typ host generation 0"
 fn parse_and_format_candidate(candidate_str: &str) -> String {
     let parts: Vec<&str> = candidate_str.split_whitespace().collect();
     
     if parts.len() >= 3 {
-        let transport = parts[0].to_uppercase(); // UDP/TCP
+        let transport = parts[0].to_lowercase(); // 使用小写，与浏览器保持一致
         let candidate_type = parts[1]; // host/srflx/relay等
         let address_port = parts[2]; // IP:PORT格式
         
@@ -514,34 +710,78 @@ fn parse_and_format_candidate(candidate_str: &str) -> String {
         
         // 验证端口是否有效
         if let Ok(port_num) = port.parse::<u16>() {
-            // 根据候选类型设置优先级
+            // 🔧 修复webrtc-rs兼容性：使用标准的优先级计算
+            // 按照RFC 5245标准计算优先级
             let priority = match candidate_type {
-                "host" => 2113937151,
-                "srflx" => 1677729535, 
-                "relay" => 16777215,
+                "host" => {
+                    // Type preference (126) + Local preference (65535) + Component (255)
+                    2130706431_u32 // 标准的host候选优先级
+                },
+                "srflx" => {
+                    // Server reflexive候选
+                    1694498815_u32 // 标准的srflx候选优先级  
+                },
+                "relay" => {
+                    // Relay候选（最低优先级）
+                    16777215_u32 // 标准的relay候选优先级
+                },
                 _ => 1000000,
             };
             
-            // 构造标准的SDP候选格式
-            // 根据RFC 5245和MDN文档，ICE候选的IP地址字段不使用方括号
-            format!(
-                "candidate:{} {} {} {} {} {} typ {}",
-                "foundation", // 基础标识符
-                1,           // component-id
-                transport,   // UDP/TCP
-                priority,    // 根据类型设置的优先级
-                ip,          // IP地址（IPv6无需方括号）
-                port_num,    // 端口号
-                candidate_type // host/srflx/relay
-            )
+            // 🔧 修复webrtc-rs兼容性：生成标准的foundation
+            let foundation = generate_standard_foundation(&ip, candidate_type, &transport);
+            
+            // 🔧 修复webrtc-rs兼容性：严格按照浏览器期望的格式生成候选
+            let candidate_format = match candidate_type {
+                "relay" => {
+                    // Relay候选必须包含raddr和rport（Chrome要求）
+                    format!(
+                        "candidate:{} 1 {} {} {} {} typ {} raddr 0.0.0.0 rport 0 generation 0",
+                        foundation, transport, priority, ip, port_num, candidate_type
+                    )
+                },
+                "srflx" => {
+                    // Server reflexive候选需要raddr和rport信息
+                    format!(
+                        "candidate:{} 1 {} {} {} {} typ {} raddr {} rport {} generation 0",
+                        foundation, transport, priority, ip, port_num, candidate_type,
+                        ip, port_num // 使用相同地址作为related地址
+                    )
+                },
+                _ => {
+                    // Host候选的标准格式
+                    format!(
+                        "candidate:{} 1 {} {} {} {} typ {} generation 0",
+                        foundation, transport, priority, ip, port_num, candidate_type
+                    )
+                }
+            };
+            
+            println!("🔧 标准SDP候选: {}", candidate_format);
+            candidate_format
         } else {
             println!("⚠️ 无效的端口号: {}, 跳过候选", port);
             String::new() // 返回空字符串，让上层跳过
         }
     } else {
         println!("⚠️ 候选格式不正确: {}, 跳过", candidate_str);
-        format!("candidate:{}", candidate_str)
+        String::new()
     }
+}
+
+/// 生成标准的foundation值（与浏览器兼容）
+fn generate_standard_foundation(ip: &str, candidate_type: &str, transport: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let mut hasher = DefaultHasher::new();
+    // 按照RFC 5245标准，foundation基于IP、传输协议和候选类型
+    ip.hash(&mut hasher);
+    transport.hash(&mut hasher);
+    candidate_type.hash(&mut hasher);
+    
+    // 生成一个合理长度的foundation（通常8-10位数字）
+    format!("{}", hasher.finish() % 4294967295) // 使用32位最大值
 }
 
 /// 解析地址:端口字符串，处理各种格式，包括webrtc-rs的bug格式

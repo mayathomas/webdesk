@@ -59,7 +59,8 @@ async function loadWebRTCConfig() {
             ],
             iceCandidatePoolSize: 10,
             bundlePolicy: 'max-bundle',
-            rtcpMuxPolicy: 'require'
+            rtcpMuxPolicy: 'require',
+            iceTransportPolicy: 'all'
         };
         console.log('💡 使用默认WebRTC配置');
         return rtcConfiguration;
@@ -172,6 +173,12 @@ async function initWebRTC() {
     console.log('🌐 初始化WebRTC...');
     console.log('📋 ICE服务器配置:', rtcConfiguration.iceServers);
     
+    // 添加ICE传输策略 - 允许所有连接方式
+    if (!rtcConfiguration.iceTransportPolicy) {
+        rtcConfiguration.iceTransportPolicy = 'all'; // 允许host、srflx、relay所有候选
+        console.log('🔧 设置ICE传输策略为: all (允许所有连接方式)');
+    }
+    
     // 创建PeerConnection
     peerConnection = new RTCPeerConnection(rtcConfiguration);
     
@@ -203,8 +210,14 @@ async function initWebRTC() {
         if (peerConnection.iceConnectionState === 'failed') {
             console.error('❌ ICE连接失败');
             console.log('💡 可能原因：1. NAT类型不兼容 2. 防火墙阻止 3. TURN服务器不可用');
+            
+            // 获取详细的连接统计信息
+            getConnectionStats();
         } else if (peerConnection.iceConnectionState === 'connected') {
             console.log('✅ ICE连接建立成功');
+            
+            // 显示成功的连接统计
+            getConnectionStats();
         } else if (peerConnection.iceConnectionState === 'checking') {
             console.log('🔍 正在检查ICE连接...');
         }
@@ -822,3 +835,45 @@ function handleChunkedMessage(arrayBuffer) {
 window.addEventListener('load', function() {
     console.log('🚀 WebRTC远程桌面控制页面已加载');
 }); 
+
+// WebRTC连接统计信息
+async function getConnectionStats() {
+    if (!peerConnection) return;
+    
+    try {
+        const stats = await peerConnection.getStats();
+        console.group('📊 WebRTC连接统计');
+        
+        stats.forEach((report) => {
+            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                console.log('✅ 成功的候选对:', {
+                    localCandidateId: report.localCandidateId,
+                    remoteCandidateId: report.remoteCandidateId,
+                    state: report.state,
+                    nominated: report.nominated,
+                    bytesReceived: report.bytesReceived,
+                    bytesSent: report.bytesSent
+                });
+            } else if (report.type === 'local-candidate') {
+                console.log('📍 本地候选:', {
+                    candidateType: report.candidateType,
+                    ip: report.ip || report.address,
+                    port: report.port,
+                    protocol: report.protocol,
+                    relayProtocol: report.relayProtocol
+                });
+            } else if (report.type === 'remote-candidate') {
+                console.log('🌐 远程候选:', {
+                    candidateType: report.candidateType,
+                    ip: report.ip || report.address, 
+                    port: report.port,
+                    protocol: report.protocol
+                });
+            }
+        });
+        
+        console.groupEnd();
+    } catch (error) {
+        console.error('❌ 获取连接统计失败:', error);
+    }
+} 

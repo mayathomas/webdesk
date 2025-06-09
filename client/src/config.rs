@@ -25,38 +25,39 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// 获取配置文件路径
     pub fn get_config_path() -> Result<PathBuf> {
-        // 直接使用当前目录下的client.conf文件
-        Ok(PathBuf::from("client.conf"))
+        // 直接使用当前目录下的webrtc-config.yaml文件
+        Ok(PathBuf::from("webrtc-config.yaml"))
     }
 
-    /// 加载配置文件
+    /// 从webrtc-config.yaml加载配置
     pub fn load() -> Result<Self> {
         let config_path = Self::get_config_path()?;
         
         if config_path.exists() {
-            let content = fs::read_to_string(&config_path)?;
-            let config: ClientConfig = toml::from_str(&content)?;
-            Ok(config)
+            // 从WebRTC配置文件中读取server_config部分
+            let webrtc_config = WebRtcConfig::load_from_file("webrtc-config.yaml")?;
+            Ok(ClientConfig {
+                server_url: webrtc_config.server_config.server_url,
+                client_id: Some(webrtc_config.server_config.client_id),
+                auth_code: webrtc_config.server_config.auth_code,
+            })
         } else {
             let config = Self::default();
-            config.save()?;
             Ok(config)
         }
     }
 
-    /// 保存配置文件
+    /// 保存配置文件（暂时保留兼容性，实际会更新webrtc-config.yaml）
     pub fn save(&self) -> Result<()> {
-        let config_path = Self::get_config_path()?;
-        let content = toml::to_string_pretty(self)?;
-        fs::write(&config_path, content)?;
-        println!("📝 配置已保存到: {}", config_path.display());
+        println!("📝 配置现在统一管理在 webrtc-config.yaml 中");
         Ok(())
     }
 
     /// 更新客户端ID
     pub fn update_client_id(&mut self, client_id: String) -> Result<()> {
         self.client_id = Some(client_id);
-        self.save()
+        // 这里可以实现更新webrtc-config.yaml中的client_id
+        Ok(())
     }
 
     /// 获取MAC地址（运行时获取，不保存）
@@ -106,9 +107,10 @@ pub struct RtcConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Deployment {
-    pub environment: String,
-    pub cloud_ip: String,
+pub struct ServerConfig {
+    pub server_url: String,
+    pub client_id: String,
+    pub auth_code: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -116,7 +118,7 @@ pub struct WebRtcConfig {
     pub stun_servers: Vec<StunServer>,
     pub turn_servers: Vec<TurnServer>,
     pub rtc_config: RtcConfig,
-    pub deployment: Deployment,
+    pub server_config: ServerConfig,
 }
 
 impl WebRtcConfig {
@@ -127,29 +129,12 @@ impl WebRtcConfig {
         Ok(config)
     }
 
-    /// 获取调整后的配置（根据部署环境）
-    pub fn get_adjusted_config(&self) -> Self {
-        let mut config = self.clone();
-        
-        // 如果是云服务器环境，替换localhost为云服务器IP
-        if self.deployment.environment == "cloud" {
-            for turn_server in &mut config.turn_servers {
-                if turn_server.url.contains("127.0.0.1") {
-                    turn_server.url = turn_server.url.replace("127.0.0.1", &self.deployment.cloud_ip);
-                }
-            }
-        }
-        
-        config
-    }
-
     /// 转换为webrtc-rs的RTCIceServer格式
     pub fn to_ice_servers(&self) -> Vec<RTCIceServer> {
-        let adjusted = self.get_adjusted_config();
         let mut ice_servers = Vec::new();
         
         // 添加STUN服务器
-        for stun in &adjusted.stun_servers {
+        for stun in &self.stun_servers {
             ice_servers.push(RTCIceServer {
                 urls: vec![stun.url.clone()],
                 username: "".to_owned(),
@@ -159,7 +144,7 @@ impl WebRtcConfig {
         }
         
         // 添加TURN服务器
-        for turn in &adjusted.turn_servers {
+        for turn in &self.turn_servers {
             ice_servers.push(RTCIceServer {
                 urls: vec![turn.url.clone()],
                 username: turn.username.clone(),

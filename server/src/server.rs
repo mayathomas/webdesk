@@ -388,4 +388,14 @@ fn generate_client_id(mac_address: &str) -> String {
     let hash = hasher.finish();
     
     format!("{:016x}", hash)
+}
+
+/// 启动HTTPS服务器（当前未实现，回退到HTTP）
+pub async fn start_https_server(addr: SocketAddr) -> Result<()> {
+    println!("❌ HTTPS功能尚未完全实现");
+    println!("💡 需要配置SSL证书和TLS支持");
+    println!("🔧 当前回退到HTTP模式，运行: cargo run");
+    
+    // 暂时使用HTTP服务器
+    start_server(addr).await
 } 
