@@ -138,7 +138,7 @@ pub async fn input_event_thread(
 }
 
 /// 处理鼠标事件
-fn handle_mouse_event(mouse_event: MouseEvent, input_controller: &InputController) {
+pub fn handle_mouse_event(mouse_event: MouseEvent, input_controller: &InputController) {
     match mouse_event.event_type.as_str() {
         "click" => {
             if let Err(e) =
@@ -164,7 +164,7 @@ fn handle_mouse_event(mouse_event: MouseEvent, input_controller: &InputControlle
 }
 
 /// 处理键盘事件
-fn handle_keyboard_event(keyboard_event: KeyboardEvent, input_controller: &InputController) {
+pub fn handle_keyboard_event(keyboard_event: KeyboardEvent, input_controller: &InputController) {
     match keyboard_event.event_type.as_str() {
         "press" => {
             if let Err(e) = input_controller.press_key(&keyboard_event.key) {

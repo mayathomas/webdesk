@@ -169,6 +169,8 @@ impl ScreenCaptureService {
         // 调整为720p以进一步减少数据量和延迟
         const MAX_WIDTH: u32 = 1280;   // 720p宽度
         const MAX_HEIGHT: u32 = 720;   // 720p高度
+        // const MAX_WIDTH: u32 = 1920;   // 1080p宽度
+        // const MAX_HEIGHT: u32 = 1080;  // 1080p高度
         const MAX_PIXELS: u32 = MAX_WIDTH * MAX_HEIGHT; // 约0.9M像素
         
         let total_pixels = width * height;

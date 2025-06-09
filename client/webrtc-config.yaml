@@ -18,7 +18,7 @@ rtc_config:
 
 # 服务器连接配置
 server_config:
-  # server_url: "ws://115.159.125.146:3000/ws"
-  server_url: "ws://127.0.0.1:3000/ws"
+  server_url: "ws://115.159.125.146:3000/ws"
+  # server_url: "ws://127.0.0.1:3000/ws"
   client_id: "890e78618669b636"
   auth_code: "11111" 

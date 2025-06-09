@@ -728,11 +728,15 @@ async fn handle_data_channel_message(_data_channel: Arc<RTCDataChannel>, msg: Da
             match message {
                 WebSocketMessage::MouseEvent(mouse_event) => {
                     log::debug!("🖱️ 通过WebRTC收到鼠标事件: {:?}", mouse_event);
-                    // TODO: 处理鼠标事件
+                    // 直接处理鼠标事件
+                    let input_controller = crate::input::InputController::new();
+                    crate::threads::handle_mouse_event(mouse_event, &input_controller);
                 }
                 WebSocketMessage::KeyboardEvent(keyboard_event) => {
                     log::debug!("⌨️ 通过WebRTC收到键盘事件: {:?}", keyboard_event);
-                    // TODO: 处理键盘事件
+                    // 直接处理键盘事件  
+                    let input_controller = crate::input::InputController::new();
+                    crate::threads::handle_keyboard_event(keyboard_event, &input_controller);
                 }
                 _ => {}
             }
