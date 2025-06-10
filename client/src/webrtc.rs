@@ -216,9 +216,28 @@ impl WebRTCClient {
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected => {
                     log::info!("🎉 ICE连接已建立！");
+                    
+                    // 🔧 新增：连接建立后分析连接模式
+                    let pc = peer_connection_clone_ice.clone();
+                    tokio::spawn(async move {
+                        // 等待连接稳定
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                        
+                        Self::analyze_connection_mode(&pc).await;
+                    });
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Completed => {
                     log::info!("✅ ICE连接完成！");
+                    
+                    // 🔧 新增：连接完成后进行详细分析
+                    let pc = peer_connection_clone_ice.clone();
+                    tokio::spawn(async move {
+                        // 等待连接完全稳定
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                        
+                        Self::analyze_connection_mode(&pc).await;
+                        Self::display_ice_server_info().await;
+                    });
                 }
                 webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Failed => {
                     log::error!("❌ ICE连接失败！");
@@ -508,6 +527,130 @@ impl WebRTCClient {
         }
         
         analysis
+    }
+    
+    /// 🔧 新增：分析连接模式（P2P vs Relay）
+    async fn analyze_connection_mode(peer_connection: &Arc<RTCPeerConnection>) {
+        log::info!("🔍 ========== WebRTC连接模式分析 ==========");
+        
+        // 获取本地和远程描述进行分析
+        let local_analysis = if let Some(local_desc) = peer_connection.local_description().await {
+            let analysis = Self::analyze_sdp(&local_desc.sdp);
+            log::info!("📤 本地SDP分析:");
+            log::info!("   🏠 Host候选: {}", analysis.host_candidates);
+            log::info!("   🌐 Srflx候选: {}", analysis.srflx_candidates);
+            log::info!("   🔄 Relay候选: {}", analysis.relay_candidates);
+            log::info!("   📊 总候选数: {}", analysis.total_candidates);
+            Some(analysis)
+        } else {
+            log::warn!("⚠️ 无法获取本地SDP描述");
+            None
+        };
+        
+        let remote_analysis = if let Some(remote_desc) = peer_connection.remote_description().await {
+            let analysis = Self::analyze_sdp(&remote_desc.sdp);
+            log::info!("📥 远程SDP分析:");
+            log::info!("   🏠 Host候选: {}", analysis.host_candidates);
+            log::info!("   🌐 Srflx候选: {}", analysis.srflx_candidates);
+            log::info!("   🔄 Relay候选: {}", analysis.relay_candidates);
+            log::info!("   📊 总候选数: {}", analysis.total_candidates);
+            Some(analysis)
+        } else {
+            log::warn!("⚠️ 无法获取远程SDP描述");
+            None
+        };
+        
+        // 分析连接模式
+        if let (Some(local), Some(remote)) = (local_analysis, remote_analysis) {
+            let total_relay = local.relay_candidates + remote.relay_candidates;
+            let total_host = local.host_candidates + remote.host_candidates;
+            let total_srflx = local.srflx_candidates + remote.srflx_candidates;
+            
+            log::info!("🎯 连接模式分析结果:");
+            
+            // 判断连接模式
+            if total_relay > 0 && (total_host == 0 && total_srflx == 0) {
+                log::info!("   🔄 连接模式: **RELAY模式** (通过TURN服务器中继)");
+                log::info!("   📍 说明: 双方都在NAT后面，无法直连，所有流量通过TURN服务器转发");
+            } else if total_host > 0 && total_relay == 0 {
+                log::info!("   🏠 连接模式: **直连P2P模式** (Host-to-Host)");
+                log::info!("   📍 说明: 双方在同一网络或公网，可以直接连接");
+            } else if total_srflx > 0 && total_relay == 0 {
+                log::info!("   🌐 连接模式: **NAT穿透P2P模式** (通过STUN辅助)");
+                log::info!("   📍 说明: 通过STUN服务器辅助NAT穿透，实现P2P直连");
+            } else if total_relay > 0 && (total_host > 0 || total_srflx > 0) {
+                log::info!("   🔀 连接模式: **混合模式** (TURN备用 + P2P优先)");
+                log::info!("   📍 说明: 优先尝试P2P连接，TURN作为备用");
+            } else {
+                log::info!("   ❓ 连接模式: **未知模式**");
+            }
+            
+            // 显示数据传输路径
+            log::info!("📊 ICE候选统计:");
+            log::info!("   🏠 Host (本地网络): {} 个", total_host);
+            log::info!("   🌐 Srflx (STUN辅助): {} 个", total_srflx);
+            log::info!("   🔄 Relay (TURN中继): {} 个", total_relay);
+            
+            // 性能和延迟预估
+            if total_relay > 0 && total_host == 0 && total_srflx == 0 {
+                log::info!("⚡ 性能预估: 中等延迟 (通过TURN服务器转发)");
+            } else if total_host > 0 || total_srflx > 0 {
+                log::info!("⚡ 性能预估: 低延迟 (P2P直连)");
+            }
+        }
+        
+        log::info!("=======================================");
+    }
+    
+    /// 🔧 新增：显示当前使用的ICE服务器信息
+    async fn display_ice_server_info() {
+        log::info!("🌐 ========== ICE服务器配置信息 ==========");
+        
+        // 从配置文件读取ICE服务器信息
+        match crate::config::WebRtcConfig::load_from_file("webrtc-config.yaml") {
+            Ok(config) => {
+                log::info!("📋 当前ICE服务器配置:");
+                
+                // 显示STUN服务器
+                if !config.stun_servers.is_empty() {
+                    log::info!("🎯 STUN服务器 ({} 个):", config.stun_servers.len());
+                    for (i, stun) in config.stun_servers.iter().enumerate() {
+                        log::info!("   {}. {}", i + 1, stun.url);
+                    }
+                } else {
+                    log::info!("   📍 未配置STUN服务器");
+                }
+                
+                // 显示TURN服务器
+                if !config.turn_servers.is_empty() {
+                    log::info!("🔄 TURN服务器 ({} 个):", config.turn_servers.len());
+                    for (i, turn) in config.turn_servers.iter().enumerate() {
+                        log::info!("   {}. {} (用户名: {})", i + 1, turn.url, turn.username);
+                    }
+                } else {
+                    log::info!("   📍 未配置TURN服务器");
+                }
+                
+                // 显示RTC配置
+                log::info!("⚙️ RTC配置:");
+                log::info!("   🧊 ICE候选池大小: {}", config.rtc_config.ice_candidate_pool_size);
+                log::info!("   📦 Bundle策略: {}", config.rtc_config.bundle_policy);
+                log::info!("   🔀 RTCP Mux策略: {}", config.rtc_config.rtcp_mux_policy);
+                
+                // 显示服务器连接配置
+                log::info!("🔗 信令服务器配置:");
+                log::info!("   🌐 服务器URL: {}", config.server_config.server_url);
+                log::info!("   🆔 客户端ID: {}", config.server_config.client_id);
+            }
+            Err(e) => {
+                log::warn!("⚠️ 无法读取配置文件: {}", e);
+                log::info!("📋 使用默认STUN服务器:");
+                log::info!("   1. stun:stun.l.google.com:19302");
+                log::info!("   2. stun:stun.cloudflare.com:3478");
+            }
+        }
+        
+        log::info!("=========================================");
     }
     
     /// 处理ICE候选
