@@ -36,6 +36,10 @@ webrtc = "0.11"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.0"
 
+# 视频编码相关依赖
+ffmpeg-next = "7.0"
+ffmpeg-sys-next = "7.0"
+
 # Tauri 2.0依赖
 tauri = { version = "2.0", features = ["tray-icon"] }
 tauri-plugin-shell = "2.0"

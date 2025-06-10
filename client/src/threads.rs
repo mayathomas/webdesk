@@ -5,8 +5,55 @@ use std::time::Duration;
 use crate::types::*;
 use crate::input::InputController;
 use crate::screen::ScreenCaptureService;
+use crate::webrtc::WebRTCClient;
 
-/// RustDesk架构：屏幕捕获线程（阻塞线程）
+/// 视频流屏幕捕获线程 - 基于Chrome Remote Desktop架构
+pub async fn video_capture_thread(
+    webrtc_client: Arc<WebRTCClient>,
+    mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ThreadControlSignal>,
+) -> Result<()> {
+    log::info!("🎬 视频流屏幕捕获线程已启动 (Chrome RD架构)");
+    
+    let mut active = false;
+    
+    loop {
+        tokio::select! {
+            // 检查控制信号
+            Some(signal) = control_rx.recv() => {
+                match signal {
+                    ThreadControlSignal::Start => {
+                        log::info!("🎬 启动视频流捕获");
+                        active = true;
+                        
+                        // 启动WebRTC视频捕获
+                        if let Err(e) = webrtc_client.start_video_capture().await {
+                            log::error!("❌ 启动视频捕获失败: {}", e);
+                        }
+                    }
+                    ThreadControlSignal::Stop => {
+                        log::info!("🎬 停止视频流捕获");
+                        active = false;
+                        break;
+                    }
+                }
+            }
+            
+            // 定期检查视频统计信息
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                if active {
+                    if let Some(stats) = webrtc_client.get_video_stats().await {
+                        log::debug!("📊 视频统计: {:?}", stats);
+                    }
+                }
+            }
+        }
+    }
+    
+    log::info!("🎬 视频流屏幕捕获线程已停止");
+    Ok(())
+}
+
+/// RustDesk架构：屏幕捕获线程（阻塞线程）- 保持向后兼容
 pub fn screen_capture_thread(
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ThreadControlSignal>,
     screen_tx: tokio::sync::mpsc::UnboundedSender<WebSocketMessage>,

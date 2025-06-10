@@ -7,7 +7,8 @@
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden; /* 防止页面级别的滚动条 */
     display: flex;
     justify-content: center;
     align-items: center;
@@ -20,11 +21,16 @@ body {
     padding: 2rem;
     width: 90%;
     max-width: 1200px;
+    height: 90vh; /* 限制容器高度 */
+    overflow: hidden; /* 防止容器滚动条 */
+    display: flex;
+    flex-direction: column;
 }
 
 .header {
     text-align: center;
     margin-bottom: 2rem;
+    flex-shrink: 0; /* 防止被压缩 */
 }
 
 .header h1 {
@@ -36,6 +42,10 @@ body {
 .header p {
     color: #666;
     font-size: 1.1rem;
+}
+
+#loginSection {
+    flex-shrink: 0; /* 防止被压缩 */
 }
 
 .login-form {
@@ -116,6 +126,7 @@ body {
     padding: 0.75rem;
     border-radius: 8px;
     font-weight: 600;
+    flex-shrink: 0; /* 防止被压缩 */
 }
 
 .status.success {
@@ -139,10 +150,14 @@ body {
 .remote-desktop {
     display: none;
     text-align: center;
+    flex: 1; /* 占据剩余空间 */
+    overflow: hidden;
 }
 
 .remote-desktop.active {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
 }
 
 .desktop-container {
@@ -152,13 +167,38 @@ body {
     margin: 1rem 0;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
     width: 100%;
+    flex: 1; /* 占据剩余空间 */
     display: flex;
     justify-content: center;
-    align-items: flex-start;
-    max-height: 80vh;
-    overflow: auto;
+    align-items: center;
+    overflow: hidden; /* 移除滚动条 */
+    min-height: 0; /* 允许flex收缩 */
 }
 
+/* 视频流显示 */
+.remote-video {
+    width: 100%;
+    height: 100%;
+    border: none;
+    outline: none;
+    object-fit: contain; /* 保持比例，完整显示 */
+    background: #000;
+}
+
+/* Canvas覆盖层用于鼠标交互 */
+.desktop-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    background: transparent;
+    pointer-events: all;
+    z-index: 10;
+}
+
+/* 保持原有的canvas样式作为备用 */
 .desktop-screen {
     display: block;
     cursor: crosshair;
@@ -179,7 +219,8 @@ body {
     display: flex;
     justify-content: center;
     gap: 1rem;
-    margin-top: 1rem;
+    padding: 1rem 0;
+    flex-shrink: 0; /* 防止被压缩 */
 }
 
 .connection-info {
@@ -189,6 +230,7 @@ body {
     margin: 1rem 0;
     font-family: monospace;
     font-size: 0.9rem;
+    flex-shrink: 0; /* 防止被压缩 */
 }
 
 /* 全屏模式样式 */
@@ -206,6 +248,18 @@ body {
     align-items: center !important;
     overflow: hidden !important;
     position: relative !important;
+}
+
+.desktop-container:fullscreen .remote-video {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain !important;
 }
 
 .desktop-container:fullscreen .desktop-screen {
@@ -237,6 +291,18 @@ body {
     position: relative !important;
 }
 
+.desktop-container:-webkit-full-screen .remote-video {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain !important;
+}
+
 .desktop-container:-webkit-full-screen .desktop-screen {
     position: absolute !important;
     top: 50% !important;
@@ -264,6 +330,18 @@ body {
     align-items: center !important;
     overflow: hidden !important;
     position: relative !important;
+}
+
+.desktop-container:-moz-full-screen .remote-video {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain !important;
 }
 
 .desktop-container:-moz-full-screen .desktop-screen {

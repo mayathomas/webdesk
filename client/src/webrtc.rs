@@ -17,6 +17,8 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 use crate::types::*;
+use crate::video_track::{VideoTrackManager, VideoTrackStats};
+use crate::video_encoder::VideoEncoderConfig;
 use serde_json;
 
 /// SDP分析结果
@@ -39,6 +41,7 @@ struct SdpAnalysis {
 pub struct WebRTCClient {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    pub video_track_manager: Arc<Mutex<VideoTrackManager>>,
     pub signaling_tx: mpsc::UnboundedSender<WebSocketMessage>,
     pub client_id: String,
     pub data_channel_ready_tx: Option<mpsc::UnboundedSender<()>>,
@@ -107,9 +110,24 @@ impl WebRTCClient {
         
         log::info!("✅ WebRTC PeerConnection 已创建");
         
+        // 设置视频轨道管理器
+        let video_track_manager = Arc::new(Mutex::new(VideoTrackManager::new()));
+        
+        // 初始化默认视频轨道
+        let video_track = {
+            let mut manager = video_track_manager.lock().unwrap();
+            let encoder_config = VideoEncoderConfig::default();
+            manager.initialize(encoder_config)?
+        };
+        
+        // 添加视频轨道到PeerConnection
+        peer_connection.add_track(video_track).await?;
+        log::info!("🎥 视频轨道已添加到PeerConnection");
+        
         Ok(Self {
             peer_connection,
             data_channel: Arc::new(Mutex::new(None)),
+            video_track_manager,
             signaling_tx,
             client_id,
             data_channel_ready_tx,
@@ -856,9 +874,47 @@ impl WebRTCClient {
         Ok(())
     }
     
+    /// 启动视频屏幕捕获
+    pub async fn start_video_capture(&self) -> Result<()> {
+        log::info!("🎬 启动视频屏幕捕获");
+        
+        use crate::screen_video::{VideoScreenCaptureService, CaptureConfig, QualityLevel};
+        
+        let mut capture_service = VideoScreenCaptureService::new(self.video_track_manager.clone());
+        
+        // 配置捕获参数
+        let config = CaptureConfig {
+            target_fps: 30,
+            max_width: 1920,
+            max_height: 1080,
+            quality_level: QualityLevel::Medium,
+        };
+        capture_service.update_config(config);
+        
+        // 启动捕获线程
+        if let Err(e) = capture_service.start_capture_thread() {
+            log::error!("❌ 启动视频捕获线程失败: {}", e);
+        }
+        
+        Ok(())
+    }
+    
+    /// 获取视频统计信息
+    pub async fn get_video_stats(&self) -> Option<VideoTrackStats> {
+        let manager = self.video_track_manager.lock().unwrap();
+        manager.get_stats().await
+    }
+
     /// 关闭WebRTC连接
     pub async fn close(&self) -> Result<()> {
         log::info!("🔐 关闭WebRTC连接");
+        
+        // 停用视频轨道
+        {
+            let mut manager = self.video_track_manager.lock().unwrap();
+            manager.deactivate();
+        }
+        
         self.peer_connection.close().await?;
         Ok(())
     }

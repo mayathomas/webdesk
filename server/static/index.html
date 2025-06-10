@@ -38,16 +38,21 @@
 
         <div id="remoteDesktop" class="remote-desktop">
             <div class="desktop-container">
-                <canvas id="desktopCanvas" class="desktop-screen"></canvas>
-                <div id="loading" class="loading">正在建立WebRTC连接...</div>
+                <!-- 视频流显示 -->
+                <video id="remoteVideo" class="remote-video" autoplay muted></video>
+                <!-- Canvas用于鼠标交互 -->
+                <canvas id="desktopCanvas" class="desktop-overlay"></canvas>
+                <div id="loading" class="loading">正在建立WebRTC视频连接...</div>
             </div>
             <div class="controls">
                 <button class="btn btn-secondary" onclick="toggleFullscreen()">🖥️ 全屏显示</button>
+                <button class="btn btn-info" onclick="getVideoStats()">📊 视频统计</button>
                 <button class="btn btn-danger" onclick="disconnect()">断开连接</button>
             </div>
         </div>
     </div>
 
+    <script src="video_stream.js"></script>
     <script src="script.js"></script>
 </body>
 </html> 

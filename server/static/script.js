@@ -7,6 +7,10 @@ let screenCanvas = null;
 let canvasContext = null;
 let isConnected = false;
 
+// 视频流相关变量
+let videoStreamWebRTC = null;
+let remoteVideo = null;
+
 // 屏幕数据保存
 let lastScreenData = null; // 保存最后一次的屏幕数据
 
@@ -187,6 +191,15 @@ async function initWebRTC() {
     
     // 创建PeerConnection
     peerConnection = new RTCPeerConnection(rtcConfiguration);
+    
+    // 初始化视频流WebRTC管理器
+    videoStreamWebRTC = new VideoStreamWebRTC();
+    remoteVideo = document.getElementById('remoteVideo');
+    const canvas = document.getElementById('desktopCanvas');
+    
+    // 初始化视频接收器
+    await videoStreamWebRTC.initializeVideoReceiver(remoteVideo, canvas);
+    videoStreamWebRTC.setPeerConnection(peerConnection);
     
     // 监听连接状态变化
     peerConnection.onconnectionstatechange = function() {
@@ -422,22 +435,26 @@ function showRemoteDesktop() {
 }
 
 function initCanvas() {
-    canvas = document.getElementById('desktopCanvas');
-    ctx = canvas.getContext('2d');
-    
-    // 启用图像平滑处理
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
+    // 获取Canvas元素（现在用作鼠标交互层）
+    canvas = videoStreamWebRTC ? videoStreamWebRTC.getCanvas() : document.getElementById('desktopCanvas');
+    if (canvas) {
+        ctx = canvas.getContext('2d');
+        // 启用图像平滑处理
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+    }
 
     // 添加鼠标事件监听 - 按照VNC/RDP标准，只传递原始事件
-    canvas.addEventListener('mousedown', handleMouseDown);
-    canvas.addEventListener('mouseup', handleMouseUp);
-    canvas.addEventListener('mousemove', throttle(handleMouseMove, 16)); // 限制到60fps
-    canvas.addEventListener('wheel', handleMouseWheel, { passive: false });
-    canvas.addEventListener('contextmenu', e => e.preventDefault()); // 阻止右键菜单
-    
-    // 处理鼠标离开canvas的情况 - 重要：避免鼠标按钮卡住
-    canvas.addEventListener('mouseleave', handleMouseLeave);
+    if (canvas) {
+        canvas.addEventListener('mousedown', handleMouseDown);
+        canvas.addEventListener('mouseup', handleMouseUp);
+        canvas.addEventListener('mousemove', throttle(handleMouseMove, 16)); // 限制到60fps
+        canvas.addEventListener('wheel', handleMouseWheel, { passive: false });
+        canvas.addEventListener('contextmenu', e => e.preventDefault()); // 阻止右键菜单
+        
+        // 处理鼠标离开canvas的情况 - 重要：避免鼠标按钮卡住
+        canvas.addEventListener('mouseleave', handleMouseLeave);
+    }
     
     // 添加键盘事件监听
     document.addEventListener('keydown', handleKeyDown);
@@ -449,9 +466,9 @@ function initCanvas() {
     // 初始化鼠标焦点状态
     window.mouseInCanvas = false;
     window.mouseButtonsPressed = new Set(); // 跟踪按下的鼠标按钮
-    console.log('🎯 初始化鼠标焦点状态:', window.mouseInCanvas);
+    console.log('🎯 初始化鼠标焦点状态 (视频流模式):', window.mouseInCanvas);
     
-    console.log('画布初始化完成，开始性能监控');
+    console.log('🎥 Canvas初始化完成 (视频流模式)，开始性能监控');
     startPerformanceMonitoring();
 }
 
@@ -1273,6 +1290,18 @@ async function getConnectionStats() {
         console.error('❌ 获取连接统计失败:', error);
     }
 } 
+
+// 获取视频统计信息
+function getVideoStats() {
+    if (videoStreamWebRTC) {
+        const stats = videoStreamWebRTC.getStats();
+        console.log('📊 视频流统计:', stats);
+        
+        showStatus(`视频统计: ${stats.resolution}, FPS: ${stats.fps?.toFixed(1) || 'N/A'}, 帧数: ${stats.frameCount}`, 'info');
+    } else {
+        showStatus('视频流未初始化', 'error');
+    }
+}
 
 // 全屏显示切换
 function toggleFullscreen() {
