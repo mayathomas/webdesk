@@ -1,0 +1,1 @@
+cargo run -- --port 3477 --host 0.0.0.0
