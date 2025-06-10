@@ -120,13 +120,13 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             WebSocketMessage::Register(req) => {
                                 // 客户端注册
                                 let id = generate_client_id(&req.mac_address);
-                                let client_state = ClientState {
-                                    client_id: id.clone(),
-                                    mac_address: req.mac_address,
-                                    auth_code: req.auth_code,
-                                    is_connected: true,
-                                    browser_connected: false,
-                                };
+                                let client_state = ClientState::new(
+                                    id.clone(),
+                                    req.mac_address,
+                                    req.auth_code,
+                                    true,
+                                    false,
+                                );
                                 
                                 state.clients.insert(id.clone(), client_state);
                                 state.client_connections.insert(id.clone(), tx.clone());

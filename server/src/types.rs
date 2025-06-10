@@ -119,8 +119,17 @@ pub enum WebSocketMessage {
 
 /// 客户端状态
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClientState {
+    pub client_id: String,
+    pub mac_address: String,
     pub auth_code: String,
     pub is_connected: bool,
     pub browser_connected: bool,
+}
+
+impl ClientState {
+    pub fn new(client_id: String, mac_address: String, auth_code: String, is_connected: bool, browser_connected: bool) -> Self {
+        Self { client_id, mac_address, auth_code, is_connected, browser_connected }
+    }
 } 
