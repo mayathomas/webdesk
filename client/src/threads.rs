@@ -139,14 +139,21 @@ pub async fn input_event_thread(
     log::debug!("🎮 输入事件处理线程已停止");
 }
 
-/// 处理鼠标事件
+/// 处理鼠标事件 - 按照VNC/RDP标准，只处理原始鼠标事件
 pub fn handle_mouse_event(mouse_event: MouseEvent, input_controller: &InputController) {
     match mouse_event.event_type.as_str() {
-        "click" => {
-            if let Err(e) =
-                input_controller.click_mouse(mouse_event.x, mouse_event.y, &mouse_event.button)
-            {
-                log::error!("❌ 鼠标点击失败: {}", e);
+        "press" => {
+            log::debug!("🖱️ 处理鼠标按下: 按钮={}, 坐标=({}, {})", 
+                mouse_event.button, mouse_event.x, mouse_event.y);
+            if let Err(e) = input_controller.press_mouse_button(mouse_event.x, mouse_event.y, &mouse_event.button) {
+                log::error!("❌ 鼠标按下失败: {}", e);
+            }
+        }
+        "release" => {
+            log::debug!("🖱️ 处理鼠标释放: 按钮={}, 坐标=({}, {})", 
+                mouse_event.button, mouse_event.x, mouse_event.y);
+            if let Err(e) = input_controller.release_mouse_button(mouse_event.x, mouse_event.y, &mouse_event.button) {
+                log::error!("❌ 鼠标释放失败: {}", e);
             }
         }
         "move" => {
@@ -156,12 +163,18 @@ pub fn handle_mouse_event(mouse_event: MouseEvent, input_controller: &InputContr
         }
         "scroll" => {
             if let Some(delta) = mouse_event.scroll_delta {
+                log::debug!("🎡 处理鼠标滚轮: 方向={}, 坐标=({}, {})", 
+                    delta, mouse_event.x, mouse_event.y);
                 if let Err(e) = input_controller.scroll_mouse(mouse_event.x, mouse_event.y, delta) {
                     log::error!("❌ 鼠标滚轮失败: {}", e);
                 }
+            } else {
+                log::warn!("⚠️ 滚轮事件缺少scroll_delta字段");
             }
         }
-        _ => {}
+        unknown => {
+            log::warn!("⚠️ 未知的鼠标事件类型: {}", unknown);
+        }
     }
 }
 
@@ -180,4 +193,4 @@ pub fn handle_keyboard_event(keyboard_event: KeyboardEvent, input_controller: &I
         }
         _ => {}
     }
-} 
+}

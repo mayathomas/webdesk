@@ -36,14 +36,8 @@ impl ScreenCaptureService {
         Self {
             last_frame: None,
             frame_count: 0,
-            target_pixels: 1280 * 720, // 默认720p
+            target_pixels: 1920 * 1080, // 默认720p
         }
-    }
-    
-    /// 设置目标分辨率（根据网速调整）
-    pub fn set_target_resolution(&mut self, target_pixels: u32) {
-        self.target_pixels = target_pixels;
-        log::debug!("🎯 更新目标分辨率: {:.1}M像素", target_pixels as f64 / 1_000_000.0);
     }
     
     /// 创建一个新的屏幕捕获器实例（在调用线程中）

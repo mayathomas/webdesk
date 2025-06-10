@@ -429,10 +429,15 @@ function initCanvas() {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    // 添加鼠标事件监听
-    canvas.addEventListener('click', handleMouseClick);
+    // 添加鼠标事件监听 - 按照VNC/RDP标准，只传递原始事件
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mouseup', handleMouseUp);
     canvas.addEventListener('mousemove', throttle(handleMouseMove, 16)); // 限制到60fps
-    canvas.addEventListener('contextmenu', e => e.preventDefault());
+    canvas.addEventListener('wheel', handleMouseWheel, { passive: false });
+    canvas.addEventListener('contextmenu', e => e.preventDefault()); // 阻止右键菜单
+    
+    // 处理鼠标离开canvas的情况 - 重要：避免鼠标按钮卡住
+    canvas.addEventListener('mouseleave', handleMouseLeave);
     
     // 添加键盘事件监听
     document.addEventListener('keydown', handleKeyDown);
@@ -443,6 +448,7 @@ function initCanvas() {
     
     // 初始化鼠标焦点状态
     window.mouseInCanvas = false;
+    window.mouseButtonsPressed = new Set(); // 跟踪按下的鼠标按钮
     console.log('🎯 初始化鼠标焦点状态:', window.mouseInCanvas);
     
     console.log('画布初始化完成，开始性能监控');
@@ -479,38 +485,68 @@ function updateFullFrameAsync(screenData, startTime) {
                 lastScreenData = screenData;
                 
                 // 计算自适应显示尺寸
-                const container = canvas.parentElement;
-                const containerRect = container.getBoundingClientRect();
-                const availableWidth = containerRect.width - 20; // 留出一些边距
-                const availableHeight = window.innerHeight * 0.8; // 使用80%的视窗高度
+                let availableWidth, availableHeight;
+                
+                if (document.fullscreenElement) {
+                    // 全屏模式：使用整个屏幕尺寸
+                    availableWidth = window.innerWidth;
+                    availableHeight = window.innerHeight;
+                    console.log('🖥️ 全屏模式，使用屏幕尺寸');
+                } else {
+                    // 窗口模式：使用容器尺寸
+                    const container = canvas.parentElement;
+                    const containerRect = container.getBoundingClientRect();
+                    availableWidth = containerRect.width - 20; // 留出一些边距
+                    availableHeight = window.innerHeight * 0.8; // 使用80%的视窗高度
+                    console.log('🪟 窗口模式，使用容器尺寸');
+                }
                 
                 console.log(`📐 可用显示区域: ${availableWidth.toFixed(0)}x${availableHeight.toFixed(0)}`);
                 console.log(`📷 截屏尺寸: ${screenData.width}x${screenData.height}`);
                 
                 let canvasWidth, canvasHeight;
                 
-                // 自适应窗口模式：计算最优显示尺寸
-                if (screenData.width <= availableWidth && screenData.height <= availableHeight) {
-                    canvasWidth = screenData.width;
-                    canvasHeight = screenData.height;
-                    console.log(`✅ 自适应模式（原始尺寸）: ${canvasWidth}x${canvasHeight}`);
-                } else {
+                // 计算最优显示尺寸
+                if (document.fullscreenElement) {
+                    // 全屏模式：优先填充整个屏幕，但保持宽高比
                     const scaleForWidth = availableWidth / screenData.width;
                     const scaleForHeight = availableHeight / screenData.height;
                     const scale = Math.min(scaleForWidth, scaleForHeight);
                     
                     canvasWidth = Math.round(screenData.width * scale);
                     canvasHeight = Math.round(screenData.height * scale);
-                    console.log(`🔄 自适应模式（缩放）: ${canvasWidth}x${canvasHeight}, 比例=${scale.toFixed(3)}`);
+                    console.log(`🖥️ 全屏模式（缩放）: ${canvasWidth}x${canvasHeight}, 比例=${scale.toFixed(3)}`);
+                } else {
+                    // 窗口模式：自适应计算最优显示尺寸
+                    if (screenData.width <= availableWidth && screenData.height <= availableHeight) {
+                        canvasWidth = screenData.width;
+                        canvasHeight = screenData.height;
+                        console.log(`✅ 窗口模式（原始尺寸）: ${canvasWidth}x${canvasHeight}`);
+                    } else {
+                        const scaleForWidth = availableWidth / screenData.width;
+                        const scaleForHeight = availableHeight / screenData.height;
+                        const scale = Math.min(scaleForWidth, scaleForHeight);
+                        
+                        canvasWidth = Math.round(screenData.width * scale);
+                        canvasHeight = Math.round(screenData.height * scale);
+                        console.log(`🔄 窗口模式（缩放）: ${canvasWidth}x${canvasHeight}, 比例=${scale.toFixed(3)}`);
+                    }
                 }
                 
                 // 设置canvas的像素尺寸
                 canvas.width = canvasWidth;
                 canvas.height = canvasHeight;
                 
-                // 设置CSS显示尺寸（1:1显示）
+                // 设置CSS显示尺寸
                 canvas.style.width = canvasWidth + 'px';
                 canvas.style.height = canvasHeight + 'px';
+                
+                // 在全屏模式和窗口模式间切换时，Canvas的定位由CSS处理
+                if (document.fullscreenElement) {
+                    console.log('🎯 全屏模式，Canvas由CSS居中');
+                } else {
+                    console.log('📱 窗口模式，Canvas默认布局');
+                }
                 
                 console.log(`📐 Canvas设置: 像素=${canvas.width}x${canvas.height}, CSS=${canvasWidth}x${canvasHeight}`);
                 
@@ -732,56 +768,23 @@ function startPerformanceMonitoring() {
     }, 1000);
 }
 
-function handleMouseClick(event) {
-    if (!isConnected || !dataChannel || !lastScreenData) return;
-
-    const rect = canvas.getBoundingClientRect();
-    
-    // 获取鼠标在canvas上的相对位置（CSS像素）
-    const canvasX = event.clientX - rect.left;
-    const canvasY = event.clientY - rect.top;
-    
-    // 转换为canvas内部坐标（考虑CSS缩放）
-    const canvasPixelX = canvasX * (canvas.width / rect.width);
-    const canvasPixelY = canvasY * (canvas.height / rect.height);
-    
-    // 坐标转换链条：Canvas像素坐标 -> 客户端缩放后坐标 -> 客户端原始坐标
-    
-    // 第1步：Canvas像素坐标 -> 客户端缩放后坐标
-    const scaledX = canvasPixelX * (lastScreenData.width / canvas.width);
-    const scaledY = canvasPixelY * (lastScreenData.height / canvas.height);
-    
-    // 第2步：客户端缩放后坐标 -> 客户端原始坐标（这是关键！）
-    const clientScaleX = lastScreenData.original_width / lastScreenData.width;
-    const clientScaleY = lastScreenData.original_height / lastScreenData.height;
-    
-    const originalX = scaledX * clientScaleX;
-    const originalY = scaledY * clientScaleY;
-    
-    // 确保坐标在原始屏幕范围内
-    const clampedX = Math.max(0, Math.min(originalX, lastScreenData.original_width - 1));
-    const clampedY = Math.max(0, Math.min(originalY, lastScreenData.original_height - 1));
-    
-    console.log(`🖱️ 鼠标点击坐标转换链条:
-    📍 浏览器鼠标位置: (${event.clientX}, ${event.clientY})
-    📐 Canvas CSS尺寸: ${rect.width.toFixed(0)}x${rect.height.toFixed(0)}
-    📐 Canvas像素尺寸: ${canvas.width}x${canvas.height}
-    📍 Canvas像素坐标: (${canvasPixelX.toFixed(1)}, ${canvasPixelY.toFixed(1)})
-    📍 客户端缩放后坐标: (${scaledX.toFixed(1)}, ${scaledY.toFixed(1)})
-    📏 客户端缩放后尺寸: ${lastScreenData.width}x${lastScreenData.height}
-    📏 客户端原始尺寸: ${lastScreenData.original_width}x${lastScreenData.original_height}
-    📏 客户端缩放比例: (${clientScaleX.toFixed(3)}, ${clientScaleY.toFixed(3)})
-    🎯 最终原始屏幕坐标: (${clampedX.toFixed(0)}, ${clampedY.toFixed(0)})`);
-
-    const mouseEvent = {
-        type: 'MouseEvent',
-        x: Math.round(clampedX),
-        y: Math.round(clampedY),
-        button: event.button === 0 ? 'left' : (event.button === 2 ? 'right' : 'middle'),
-        event_type: 'click'
-    };
-
-    dataChannel.send(JSON.stringify(mouseEvent));
+function handleMouseLeave(event) {
+    // 当鼠标离开canvas时，释放所有按下的按钮，避免按钮卡住
+    if (window.mouseButtonsPressed && window.mouseButtonsPressed.size > 0) {
+        console.log(`🖱️ 鼠标离开canvas，释放 ${window.mouseButtonsPressed.size} 个按钮`);
+        
+        // 为每个按下的按钮发送释放事件
+        for (const button of window.mouseButtonsPressed) {
+            const fakeEvent = {
+                clientX: event.clientX,
+                clientY: event.clientY,
+                button: button
+            };
+            handleMouseUp(fakeEvent);
+        }
+        
+        window.mouseButtonsPressed.clear();
+    }
 }
 
 function handleMouseMove(event) {
@@ -831,6 +834,135 @@ function handleMouseMove(event) {
         y: Math.round(clampedY),
         button: 'none',
         event_type: 'move'
+    };
+
+    dataChannel.send(JSON.stringify(mouseEvent));
+}
+
+function handleMouseDown(event) {
+    if (!isConnected || !dataChannel || !lastScreenData) return;
+
+    // 记录按下的按钮
+    window.mouseButtonsPressed.add(event.button);
+
+    const rect = canvas.getBoundingClientRect();
+    
+    // 获取鼠标在canvas上的相对位置（CSS像素）
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+    
+    // 转换为canvas内部坐标（考虑CSS缩放）
+    const canvasPixelX = canvasX * (canvas.width / rect.width);
+    const canvasPixelY = canvasY * (canvas.height / rect.height);
+    
+    // 坐标转换链条：Canvas像素坐标 -> 客户端缩放后坐标 -> 客户端原始坐标
+    const scaledX = canvasPixelX * (lastScreenData.width / canvas.width);
+    const scaledY = canvasPixelY * (lastScreenData.height / canvas.height);
+    
+    const clientScaleX = lastScreenData.original_width / lastScreenData.width;
+    const clientScaleY = lastScreenData.original_height / lastScreenData.height;
+    
+    const originalX = scaledX * clientScaleX;
+    const originalY = scaledY * clientScaleY;
+    
+    const clampedX = Math.max(0, Math.min(originalX, lastScreenData.original_width - 1));
+    const clampedY = Math.max(0, Math.min(originalY, lastScreenData.original_height - 1));
+    
+    console.log(`🖱️ 鼠标按下: 按钮=${event.button}(${event.button === 0 ? 'left' : (event.button === 2 ? 'right' : 'middle')}), 坐标=(${clampedX.toFixed(0)}, ${clampedY.toFixed(0)})`);
+
+    const mouseEvent = {
+        type: 'MouseEvent',
+        x: Math.round(clampedX),
+        y: Math.round(clampedY),
+        button: event.button === 0 ? 'left' : (event.button === 2 ? 'right' : 'middle'),
+        event_type: 'press'
+    };
+
+    dataChannel.send(JSON.stringify(mouseEvent));
+}
+
+function handleMouseUp(event) {
+    if (!isConnected || !dataChannel || !lastScreenData) return;
+
+    // 移除按下的按钮记录
+    window.mouseButtonsPressed.delete(event.button);
+
+    const rect = canvas.getBoundingClientRect();
+    
+    // 获取鼠标在canvas上的相对位置（CSS像素）
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+    
+    // 转换为canvas内部坐标（考虑CSS缩放）
+    const canvasPixelX = canvasX * (canvas.width / rect.width);
+    const canvasPixelY = canvasY * (canvas.height / rect.height);
+    
+    // 坐标转换链条：Canvas像素坐标 -> 客户端缩放后坐标 -> 客户端原始坐标
+    const scaledX = canvasPixelX * (lastScreenData.width / canvas.width);
+    const scaledY = canvasPixelY * (lastScreenData.height / canvas.height);
+    
+    const clientScaleX = lastScreenData.original_width / lastScreenData.width;
+    const clientScaleY = lastScreenData.original_height / lastScreenData.height;
+    
+    const originalX = scaledX * clientScaleX;
+    const originalY = scaledY * clientScaleY;
+    
+    const clampedX = Math.max(0, Math.min(originalX, lastScreenData.original_width - 1));
+    const clampedY = Math.max(0, Math.min(originalY, lastScreenData.original_height - 1));
+    
+    console.log(`🖱️ 鼠标释放: 按钮=${event.button}(${event.button === 0 ? 'left' : (event.button === 2 ? 'right' : 'middle')}), 坐标=(${clampedX.toFixed(0)}, ${clampedY.toFixed(0)})`);
+
+    const mouseEvent = {
+        type: 'MouseEvent',
+        x: Math.round(clampedX),
+        y: Math.round(clampedY),
+        button: event.button === 0 ? 'left' : (event.button === 2 ? 'right' : 'middle'),
+        event_type: 'release'
+    };
+
+    dataChannel.send(JSON.stringify(mouseEvent));
+}
+
+function handleMouseWheel(event) {
+    if (!isConnected || !dataChannel || !lastScreenData) return;
+    
+    event.preventDefault(); // 阻止页面滚动
+
+    const rect = canvas.getBoundingClientRect();
+    
+    // 获取鼠标在canvas上的相对位置（CSS像素）
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+    
+    // 转换为canvas内部坐标（考虑CSS缩放）
+    const canvasPixelX = canvasX * (canvas.width / rect.width);
+    const canvasPixelY = canvasY * (canvas.height / rect.height);
+    
+    // 坐标转换链条：Canvas像素坐标 -> 客户端缩放后坐标 -> 客户端原始坐标
+    const scaledX = canvasPixelX * (lastScreenData.width / canvas.width);
+    const scaledY = canvasPixelY * (lastScreenData.height / canvas.height);
+    
+    const clientScaleX = lastScreenData.original_width / lastScreenData.width;
+    const clientScaleY = lastScreenData.original_height / lastScreenData.height;
+    
+    const originalX = scaledX * clientScaleX;
+    const originalY = scaledY * clientScaleY;
+    
+    const clampedX = Math.max(0, Math.min(originalX, lastScreenData.original_width - 1));
+    const clampedY = Math.max(0, Math.min(originalY, lastScreenData.original_height - 1));
+    
+    // 计算滚轮方向和滚动量
+    const delta = Math.sign(event.deltaY) * -1; // 上滚为正数，下滚为负数
+    
+    console.log(`🎡 鼠标滚轮: 方向=${delta}, 坐标=(${clampedX.toFixed(0)}, ${clampedY.toFixed(0)})`);
+
+    const mouseEvent = {
+        type: 'MouseEvent',
+        x: Math.round(clampedX),
+        y: Math.round(clampedY),
+        button: 'none',
+        event_type: 'scroll',
+        scroll_delta: delta
     };
 
     dataChannel.send(JSON.stringify(mouseEvent));
@@ -1144,12 +1276,12 @@ async function getConnectionStats() {
 
 // 全屏显示切换
 function toggleFullscreen() {
-    const remoteDesktop = document.getElementById('remoteDesktop');
+    const desktopContainer = document.querySelector('.desktop-container');
     
-    if (!document.fullscreenElement) {
+            if (!document.fullscreenElement) {
         // 进入全屏
-        if (remoteDesktop.requestFullscreen) {
-            remoteDesktop.requestFullscreen().then(() => {
+        if (desktopContainer.requestFullscreen) {
+            desktopContainer.requestFullscreen().then(() => {
                 console.log('🖥️ 已进入全屏模式');
                 showStatus('已进入全屏模式', 'success');
                 

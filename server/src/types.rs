@@ -120,8 +120,6 @@ pub enum WebSocketMessage {
 /// 客户端状态
 #[derive(Debug, Clone)]
 pub struct ClientState {
-    pub client_id: String,
-    pub mac_address: String,
     pub auth_code: String,
     pub is_connected: bool,
     pub browser_connected: bool,

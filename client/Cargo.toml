@@ -17,7 +17,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 url = "2.4"
-rdev = "0.4"
 base64 = "0.21"
 image = "0.25"
 fast_image_resize = "5.1"  # 高性能图像缩放库，支持SIMD
@@ -51,3 +50,24 @@ env_logger = { workspace = true }
 default = ["custom-protocol"]
 # 用于构建时的Tauri特性
 custom-protocol = ["tauri/custom-protocol"]
+
+# 跨平台输入控制 - 使用平台特定的最优解决方案
+
+# Windows平台特定优化
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading"
+]}
+
+# macOS平台特定实现  
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+
+# Linux平台特定实现
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = "2.21"
+libc = "0.2"
