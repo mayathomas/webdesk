@@ -100,6 +100,16 @@ body {
     box-shadow: 0 10px 20px rgba(255, 107, 107, 0.3);
 }
 
+.btn-secondary {
+    background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%);
+    color: white;
+}
+
+.btn-secondary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px rgba(149, 165, 166, 0.3);
+}
+
 .status {
     text-align: center;
     margin: 1rem 0;
@@ -139,16 +149,24 @@ body {
     position: relative;
     background: #000;
     border-radius: 8px;
-    overflow: hidden;
     margin: 1rem 0;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    max-height: 80vh;
+    overflow: auto;
 }
 
 .desktop-screen {
-    width: 100%;
-    height: auto;
     display: block;
     cursor: crosshair;
+    border: none;
+    outline: none;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
 }
 
 .loading {

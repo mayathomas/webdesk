@@ -40,7 +40,7 @@ pub fn screen_capture_thread(
         // 如果激活且达到捕获间隔
         if active && last_capture.elapsed() >= capture_interval {
             match screen_service.capture_screen_optimized(&mut capturer) {
-                Ok((image_data, width, height, format, full_frame, changed_regions)) => {
+                Ok((image_data, width, height, original_width, original_height, format, full_frame, changed_regions)) => {
                     // 保存用于日志的值
                     let log_format = format.clone();
                     let log_regions_count = changed_regions.as_ref().map(|r| r.len()).unwrap_or(0);
@@ -49,6 +49,8 @@ pub fn screen_capture_thread(
                         image_data,
                         width,
                         height,
+                        original_width,
+                        original_height,
                         format,
                         full_frame,
                         changed_regions,

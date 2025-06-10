@@ -27,6 +27,7 @@ pub struct ScreenFrame {
 pub struct ScreenCaptureService {
     last_frame: Option<ScreenFrame>,
     frame_count: u32,
+    target_pixels: u32, // 可配置的目标像素数
 }
 
 impl ScreenCaptureService {
@@ -35,7 +36,14 @@ impl ScreenCaptureService {
         Self {
             last_frame: None,
             frame_count: 0,
+            target_pixels: 1280 * 720, // 默认720p
         }
+    }
+    
+    /// 设置目标分辨率（根据网速调整）
+    pub fn set_target_resolution(&mut self, target_pixels: u32) {
+        self.target_pixels = target_pixels;
+        log::debug!("🎯 更新目标分辨率: {:.1}M像素", target_pixels as f64 / 1_000_000.0);
     }
     
     /// 创建一个新的屏幕捕获器实例（在调用线程中）
@@ -46,7 +54,7 @@ impl ScreenCaptureService {
     }
     
     /// 捕获屏幕并返回优化后的数据
-    pub fn capture_screen_optimized(&mut self, capturer: &mut Capturer) -> Result<(String, u32, u32, String, bool, Option<Vec<ChangedRegion>>)> {
+    pub fn capture_screen_optimized(&mut self, capturer: &mut Capturer) -> Result<(String, u32, u32, u32, u32, String, bool, Option<Vec<ChangedRegion>>)> {
         let start_time = std::time::Instant::now();
         
         let original_width = capturer.width() as u32;
@@ -113,7 +121,7 @@ impl ScreenCaptureService {
             
             self.last_frame = Some(current_frame);
             
-            Ok((base64_data, width, height, "jpeg".to_string(), true, None))
+            Ok((base64_data, width, height, original_width, original_height, "jpeg".to_string(), true, None))
         } else {
             // 检测变化并发送差分数据
             if let Some(ref last_frame) = self.last_frame {
@@ -121,11 +129,11 @@ impl ScreenCaptureService {
                 
                 if changed_regions.is_empty() {
                     // 没有变化，返回空数据
-                    Ok(("".to_string(), width, height, "diff".to_string(), false, Some(vec![])))
+                    Ok(("".to_string(), width, height, original_width, original_height, "diff".to_string(), false, Some(vec![])))
                 } else {
                     // 有变化，发送差分数据
                     self.last_frame = Some(current_frame);
-                    Ok(("".to_string(), width, height, "diff".to_string(), false, Some(changed_regions)))
+                    Ok(("".to_string(), width, height, original_width, original_height, "diff".to_string(), false, Some(changed_regions)))
                 }
             } else {
                 // 没有上一帧，发送完整帧
@@ -134,7 +142,7 @@ impl ScreenCaptureService {
                 
                 self.last_frame = Some(current_frame);
                 
-                Ok((base64_data, width, height, "jpeg".to_string(), true, None))
+                Ok((base64_data, width, height, original_width, original_height, "jpeg".to_string(), true, None))
             }
         }
     }
@@ -165,26 +173,29 @@ impl ScreenCaptureService {
     }
     
     /// 计算目标分辨率 - 根据业界最佳实践
-    fn calculate_target_resolution(width: u32, height: u32) -> (u32, u32) {
-        // 调整为720p以进一步减少数据量和延迟
-        const MAX_WIDTH: u32 = 1280;   // 720p宽度
-        const MAX_HEIGHT: u32 = 720;   // 720p高度
-        // const MAX_WIDTH: u32 = 1920;   // 1080p宽度
-        // const MAX_HEIGHT: u32 = 1080;  // 1080p高度
-        const MAX_PIXELS: u32 = MAX_WIDTH * MAX_HEIGHT; // 约0.9M像素
+    fn calculate_target_resolution(&self, width: u32, height: u32) -> (u32, u32) {
+        // 🎯 智能分辨率调整：保持原始宽高比，等比例缩放
+        // 目标像素数：可配置，适合网络传输和性能平衡
+        let target_pixels = self.target_pixels;
         
-        let total_pixels = width * height;
+        let original_pixels = width * height;
         
-        // 如果像素数超过上限，按比例缩放
-        if total_pixels > MAX_PIXELS {
-            let scale_factor = (MAX_PIXELS as f64 / total_pixels as f64).sqrt();
-            let new_width = (width as f64 * scale_factor) as u32;
-            let new_height = (height as f64 * scale_factor) as u32;
-            log::debug!("📏 自动缩放: {}*{}像素 -> {}*{}像素 (缩放比例: {:.2})", width, height, new_width, new_height, scale_factor);
-            (new_width, new_height)
-        } else {
-            (width, height)
+                 // 如果原始分辨率已经适中，不需要缩放
+         if original_pixels <= target_pixels {
+            log::debug!("📏 分辨率适中，保持原样: {}x{} ({:.1}M像素)", 
+                width, height, original_pixels as f64 / 1_000_000.0);
+            return (width, height);
         }
+        
+                 // 等比例缩放：保持宽高比，完整显示所有内容
+         let scale_factor = (target_pixels as f64 / original_pixels as f64).sqrt();
+        let new_width = ((width as f64 * scale_factor).round() as u32 / 2) * 2; // 确保偶数
+        let new_height = ((height as f64 * scale_factor).round() as u32 / 2) * 2; // 确保偶数
+        
+        log::debug!("📏 等比例缩放: {}x{} -> {}x{} (缩放: {:.1}%, 完整显示)", 
+            width, height, new_width, new_height, scale_factor * 100.0);
+        
+        (new_width, new_height)
     }
     
     /// 检测帧之间的变化区域
@@ -326,7 +337,7 @@ impl ScreenCaptureService {
 
     /// 根据需要缩放帧数据 - 业界顶尖优化版本
     fn scale_frame_if_needed(&mut self, width: u32, height: u32, rgba_data: Vec<u8>) -> Result<(u32, u32, Vec<u8>)> {
-        let (target_width, target_height) = Self::calculate_target_resolution(width, height);
+        let (target_width, target_height) = self.calculate_target_resolution(width, height);
         
         // 如果不需要缩放，直接返回
         if width == target_width && height == target_height {
@@ -341,9 +352,9 @@ impl ScreenCaptureService {
             log::debug!("🚀 使用业界顶尖的并行批处理算法");
         }
         
-        // 计算缩放参数
-        let x_step = width / target_width;
-        let y_step = height / target_height;
+        // 计算缩放比例（使用浮点数，避免跳跃采样）
+        let x_scale = width as f64 / target_width as f64;
+        let y_scale = height as f64 / target_height as f64;
         let target_size = (target_width * target_height * 4) as usize;
         
         // 使用Rayon并行处理，每个核心处理不同的行
@@ -365,13 +376,21 @@ impl ScreenCaptureService {
             let mut chunk_data = vec![0u8; (end_y - start_y) as usize * target_width as usize * 4];
             
             for y in start_y..end_y {
-                let src_y = (y * y_step).min(height - 1);
+                // 使用浮点数计算源坐标，避免跳跃采样
+                let src_y_f = (y as f64) * y_scale;
+                let src_y = (src_y_f).floor() as u32;
+                let src_y = src_y.min(height - 1);
+                
                 let src_row_offset = (src_y as usize) * (width * 4) as usize;
                 let dst_row_start = ((y - start_y) * target_width * 4) as usize;
                 
                 // 安全的行处理 - 避免unsafe指针操作
                 for x in 0..target_width {
-                    let src_x = (x * x_step).min(width - 1);
+                    // 使用浮点数计算源坐标，避免跳跃采样
+                    let src_x_f = (x as f64) * x_scale;
+                    let src_x = (src_x_f).floor() as u32;
+                    let src_x = src_x.min(width - 1);
+                    
                     let src_idx = src_row_offset + (src_x as usize * 4);
                     let dst_idx = dst_row_start + (x as usize * 4);
                     

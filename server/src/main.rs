@@ -19,13 +19,13 @@ async fn main() -> Result<()> {
     
     if https_config.enabled {
         log::info!("🔒 HTTPS模式已启用");
-        
+    
         // 使用HTTP端口作为主端口启动
         let addr: SocketAddr = format!("0.0.0.0:{}", https_config.http_port).parse()?;
         server::start_server(addr).await?;
     } else {
         let addr: SocketAddr = "0.0.0.0:3000".parse()?;
-        server::start_server(addr).await?;
+    server::start_server(addr).await?;
     }
     
     Ok(())

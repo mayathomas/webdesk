@@ -41,8 +41,10 @@ pub struct IceCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenData {
     pub image_data: String, // base64编码的图片数据
-    pub width: u32,
-    pub height: u32,
+    pub width: u32,          // 缩放后的宽度
+    pub height: u32,         // 缩放后的高度
+    pub original_width: u32, // 原始屏幕宽度
+    pub original_height: u32, // 原始屏幕高度
     pub format: String, // "png", "jpeg", "diff"
     pub full_frame: bool, // 是否为完整帧
     pub changed_regions: Option<Vec<ChangedRegion>>, // 变化区域

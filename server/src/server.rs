@@ -388,4 +388,4 @@ fn generate_client_id(mac_address: &str) -> String {
     let hash = hasher.finish();
     
     format!("{:016x}", hash)
-}
+} 

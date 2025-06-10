@@ -7,6 +7,9 @@ let screenCanvas = null;
 let canvasContext = null;
 let isConnected = false;
 
+// 屏幕数据保存
+let lastScreenData = null; // 保存最后一次的屏幕数据
+
 // 分片重组相关变量
 let chunkBuffers = new Map(); // 存储分片数据的Map: messageId -> {chunks: [], totalChunks: number, totalSize: number}
 
@@ -15,6 +18,9 @@ let canvas = null;
 let ctx = null;
 let desktopCanvas = null;
 let desktopCtx = null;
+
+// 鼠标焦点状态
+window.mouseInCanvas = false;
 
 let frameCount = 0;
 let lastStatsTime = Date.now();
@@ -435,6 +441,10 @@ function initCanvas() {
     // 隐藏加载提示
     document.getElementById('loading').style.display = 'none';
     
+    // 初始化鼠标焦点状态
+    window.mouseInCanvas = false;
+    console.log('🎯 初始化鼠标焦点状态:', window.mouseInCanvas);
+    
     console.log('画布初始化完成，开始性能监控');
     startPerformanceMonitoring();
 }
@@ -465,18 +475,61 @@ function updateFullFrameAsync(screenData, startTime) {
         const img = new Image();
         img.onload = function() {
             try {
-                // 更新画布尺寸
-                if (canvas.width !== screenData.width || canvas.height !== screenData.height) {
-                    canvas.width = screenData.width;
-                    canvas.height = screenData.height;
-                    desktopCanvas.width = screenData.width;
-                    desktopCanvas.height = screenData.height;
+                // 保存屏幕数据
+                lastScreenData = screenData;
+                
+                // 计算自适应显示尺寸
+                const container = canvas.parentElement;
+                const containerRect = container.getBoundingClientRect();
+                const availableWidth = containerRect.width - 20; // 留出一些边距
+                const availableHeight = window.innerHeight * 0.8; // 使用80%的视窗高度
+                
+                console.log(`📐 可用显示区域: ${availableWidth.toFixed(0)}x${availableHeight.toFixed(0)}`);
+                console.log(`📷 截屏尺寸: ${screenData.width}x${screenData.height}`);
+                
+                let canvasWidth, canvasHeight;
+                
+                // 自适应窗口模式：计算最优显示尺寸
+                if (screenData.width <= availableWidth && screenData.height <= availableHeight) {
+                    canvasWidth = screenData.width;
+                    canvasHeight = screenData.height;
+                    console.log(`✅ 自适应模式（原始尺寸）: ${canvasWidth}x${canvasHeight}`);
+                } else {
+                    const scaleForWidth = availableWidth / screenData.width;
+                    const scaleForHeight = availableHeight / screenData.height;
+                    const scale = Math.min(scaleForWidth, scaleForHeight);
+                    
+                    canvasWidth = Math.round(screenData.width * scale);
+                    canvasHeight = Math.round(screenData.height * scale);
+                    console.log(`🔄 自适应模式（缩放）: ${canvasWidth}x${canvasHeight}, 比例=${scale.toFixed(3)}`);
                 }
                 
-                // 绘制到离屏画布
-                desktopCtx.drawImage(img, 0, 0);
+                // 设置canvas的像素尺寸
+                canvas.width = canvasWidth;
+                canvas.height = canvasHeight;
                 
-                // 立即更新显示
+                // 设置CSS显示尺寸（1:1显示）
+                canvas.style.width = canvasWidth + 'px';
+                canvas.style.height = canvasHeight + 'px';
+                
+                console.log(`📐 Canvas设置: 像素=${canvas.width}x${canvas.height}, CSS=${canvasWidth}x${canvasHeight}`);
+                
+                // 初始化离屏画布（与显示canvas相同尺寸）
+                if (!desktopCanvas) {
+                    desktopCanvas = document.createElement('canvas');
+                    desktopCtx = desktopCanvas.getContext('2d');
+                    desktopCtx.imageSmoothingEnabled = true; // 启用图像平滑，提高缩放质量
+                    desktopCtx.imageSmoothingQuality = 'high';
+                }
+                desktopCanvas.width = canvasWidth;
+                desktopCanvas.height = canvasHeight;
+                
+                // 7. 将截屏图像缩放绘制到离屏画布，完全填充
+                desktopCtx.drawImage(img, 0, 0, screenData.width, screenData.height, 0, 0, canvasWidth, canvasHeight);
+                
+                console.log(`🎯 图像缩放: ${screenData.width}x${screenData.height} -> ${canvasWidth}x${canvasHeight}`);
+                
+                // 8. 立即更新显示
                 scheduleRender();
                 
                 const renderTime = performance.now() - startTime;
@@ -502,11 +555,24 @@ function updateFullFrameAsync(screenData, startTime) {
     });
 }
 
-// 优化的异步差分帧更新 - 并行加载
+// 优化的异步差分帧更新 - 支持缩放
 function updateDifferentialFrameAsync(screenData, startTime) {
     return new Promise((resolve) => {
         const regions = screenData.changed_regions;
         console.log(`🔄 处理差分更新: ${regions.length} 个区域`);
+        
+        // 如果没有上一帧数据，无法进行差分更新
+        if (!lastScreenData) {
+            console.warn('⚠️ 没有基础帧数据，跳过差分更新');
+            resolve();
+            return;
+        }
+        
+        // 计算缩放比例
+        const scaleX = canvas.width / lastScreenData.width;
+        const scaleY = canvas.height / lastScreenData.height;
+        
+        console.log(`📏 差分更新缩放比例: X=${scaleX.toFixed(3)}, Y=${scaleY.toFixed(3)}`);
         
         // 并行加载所有区域
         const promises = regions.map(region => loadRegionImage(region));
@@ -521,7 +587,17 @@ function updateDifferentialFrameAsync(screenData, startTime) {
                 if (result.status === 'fulfilled') {
                     const { img, region } = result.value;
                     try {
-                        desktopCtx.drawImage(img, region.x, region.y);
+                        // 计算缩放后的区域位置和尺寸
+                        const scaledX = region.x * scaleX;
+                        const scaledY = region.y * scaleY;
+                        const scaledWidth = region.width * scaleX;
+                        const scaledHeight = region.height * scaleY;
+                        
+                        // 将区域图像缩放绘制到对应位置
+                        desktopCtx.drawImage(img, 
+                            0, 0, region.width, region.height,  // 源图像尺寸
+                            scaledX, scaledY, scaledWidth, scaledHeight  // 目标位置和尺寸
+                        );
                         successCount++;
                     } catch (error) {
                         console.error('绘制区域失败:', error);
@@ -608,7 +684,10 @@ function performRender() {
     
     requestAnimationFrame(() => {
         try {
-            ctx.drawImage(desktopCanvas, 0, 0);
+            // 清除整个canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // 将离屏canvas的内容完全填充到显示canvas
+            ctx.drawImage(desktopCanvas, 0, 0, desktopCanvas.width, desktopCanvas.height, 0, 0, canvas.width, canvas.height);
         } catch (error) {
             console.error('渲染失败:', error);
         } finally {
@@ -654,19 +733,50 @@ function startPerformanceMonitoring() {
 }
 
 function handleMouseClick(event) {
-    if (!isConnected || !dataChannel) return;
+    if (!isConnected || !dataChannel || !lastScreenData) return;
 
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
     
-    const x = (event.clientX - rect.left) * scaleX;
-    const y = (event.clientY - rect.top) * scaleY;
+    // 获取鼠标在canvas上的相对位置（CSS像素）
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+    
+    // 转换为canvas内部坐标（考虑CSS缩放）
+    const canvasPixelX = canvasX * (canvas.width / rect.width);
+    const canvasPixelY = canvasY * (canvas.height / rect.height);
+    
+    // 坐标转换链条：Canvas像素坐标 -> 客户端缩放后坐标 -> 客户端原始坐标
+    
+    // 第1步：Canvas像素坐标 -> 客户端缩放后坐标
+    const scaledX = canvasPixelX * (lastScreenData.width / canvas.width);
+    const scaledY = canvasPixelY * (lastScreenData.height / canvas.height);
+    
+    // 第2步：客户端缩放后坐标 -> 客户端原始坐标（这是关键！）
+    const clientScaleX = lastScreenData.original_width / lastScreenData.width;
+    const clientScaleY = lastScreenData.original_height / lastScreenData.height;
+    
+    const originalX = scaledX * clientScaleX;
+    const originalY = scaledY * clientScaleY;
+    
+    // 确保坐标在原始屏幕范围内
+    const clampedX = Math.max(0, Math.min(originalX, lastScreenData.original_width - 1));
+    const clampedY = Math.max(0, Math.min(originalY, lastScreenData.original_height - 1));
+    
+    console.log(`🖱️ 鼠标点击坐标转换链条:
+    📍 浏览器鼠标位置: (${event.clientX}, ${event.clientY})
+    📐 Canvas CSS尺寸: ${rect.width.toFixed(0)}x${rect.height.toFixed(0)}
+    📐 Canvas像素尺寸: ${canvas.width}x${canvas.height}
+    📍 Canvas像素坐标: (${canvasPixelX.toFixed(1)}, ${canvasPixelY.toFixed(1)})
+    📍 客户端缩放后坐标: (${scaledX.toFixed(1)}, ${scaledY.toFixed(1)})
+    📏 客户端缩放后尺寸: ${lastScreenData.width}x${lastScreenData.height}
+    📏 客户端原始尺寸: ${lastScreenData.original_width}x${lastScreenData.original_height}
+    📏 客户端缩放比例: (${clientScaleX.toFixed(3)}, ${clientScaleY.toFixed(3)})
+    🎯 最终原始屏幕坐标: (${clampedX.toFixed(0)}, ${clampedY.toFixed(0)})`);
 
     const mouseEvent = {
         type: 'MouseEvent',
-        x: x,
-        y: y,
+        x: Math.round(clampedX),
+        y: Math.round(clampedY),
         button: event.button === 0 ? 'left' : (event.button === 2 ? 'right' : 'middle'),
         event_type: 'click'
     };
@@ -675,19 +785,50 @@ function handleMouseClick(event) {
 }
 
 function handleMouseMove(event) {
-    if (!isConnected || !dataChannel) return;
+    if (!isConnected || !dataChannel || !lastScreenData) return;
 
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
     
-    const x = (event.clientX - rect.left) * scaleX;
-    const y = (event.clientY - rect.top) * scaleY;
+    // 获取鼠标在canvas上的相对位置（CSS像素）
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+    
+    // 更新全局鼠标位置状态（用于键盘焦点管理）
+    const prevMouseInCanvas = window.mouseInCanvas;
+    window.mouseInCanvas = (canvasX >= 0 && canvasX <= rect.width && canvasY >= 0 && canvasY <= rect.height);
+    
+    // 当焦点状态改变时打印调试信息
+    if (prevMouseInCanvas !== window.mouseInCanvas) {
+        console.log(`🎯 鼠标焦点状态变更: ${prevMouseInCanvas} -> ${window.mouseInCanvas} 
+        位置: (${canvasX.toFixed(1)}, ${canvasY.toFixed(1)}) 
+        Canvas范围: 0~${rect.width.toFixed(1)} x 0~${rect.height.toFixed(1)}`);
+    }
+    
+    // 转换为canvas内部坐标（考虑CSS缩放）
+    const canvasPixelX = canvasX * (canvas.width / rect.width);
+    const canvasPixelY = canvasY * (canvas.height / rect.height);
+    
+    // 坐标转换链条：Canvas像素坐标 -> 客户端缩放后坐标 -> 客户端原始坐标
+    
+    // 第1步：Canvas像素坐标 -> 客户端缩放后坐标
+    const scaledX = canvasPixelX * (lastScreenData.width / canvas.width);
+    const scaledY = canvasPixelY * (lastScreenData.height / canvas.height);
+    
+    // 第2步：客户端缩放后坐标 -> 客户端原始坐标
+    const clientScaleX = lastScreenData.original_width / lastScreenData.width;
+    const clientScaleY = lastScreenData.original_height / lastScreenData.height;
+    
+    const originalX = scaledX * clientScaleX;
+    const originalY = scaledY * clientScaleY;
+    
+    // 确保坐标在原始屏幕范围内
+    const clampedX = Math.max(0, Math.min(originalX, lastScreenData.original_width - 1));
+    const clampedY = Math.max(0, Math.min(originalY, lastScreenData.original_height - 1));
 
     const mouseEvent = {
         type: 'MouseEvent',
-        x: x,
-        y: y,
+        x: Math.round(clampedX),
+        y: Math.round(clampedY),
         button: 'none',
         event_type: 'move'
     };
@@ -697,20 +838,35 @@ function handleMouseMove(event) {
 
 function handleKeyDown(event) {
     if (!isConnected || !dataChannel) return;
+    
+    // 只有当鼠标在canvas范围内时才处理键盘事件
+    if (!window.mouseInCanvas) {
+        console.log(`⌨️ 键盘事件被忽略: ${event.code} (鼠标不在canvas内)`);
+        return;
+    }
 
     event.preventDefault();
 
+    // 使用 event.code 来保证按键位置的一致性
+    // event.code 代表物理按键位置，不受键盘布局影响
     const keyboardEvent = {
         type: 'KeyboardEvent',
         key: event.code,
         event_type: 'press'
     };
 
+    console.log(`⌨️ 键盘按下: ${event.code} -> "${event.key}" (鼠标在canvas内: ${window.mouseInCanvas})`);
     dataChannel.send(JSON.stringify(keyboardEvent));
 }
 
 function handleKeyUp(event) {
     if (!isConnected || !dataChannel) return;
+    
+    // 只有当鼠标在canvas范围内时才处理键盘事件
+    if (!window.mouseInCanvas) {
+        console.log(`⌨️ 键盘释放被忽略: ${event.code} (鼠标不在canvas内)`);
+        return;
+    }
 
     event.preventDefault();
 
@@ -720,6 +876,7 @@ function handleKeyUp(event) {
         event_type: 'release'
     };
 
+    console.log(`⌨️ 键盘释放: ${event.code} -> "${event.key}" (鼠标在canvas内: ${window.mouseInCanvas})`);
     dataChannel.send(JSON.stringify(keyboardEvent));
 }
 
@@ -925,6 +1082,22 @@ function handleChunkedMessage(arrayBuffer) {
 // 页面加载完成后的初始化
 window.addEventListener('load', function() {
     console.log('🚀 WebRTC远程桌面控制页面已加载');
+});
+
+// 全屏状态变化监听器
+document.addEventListener('fullscreenchange', function() {
+    const button = document.querySelector('button[onclick="toggleFullscreen()"]');
+    if (button) {
+        if (document.fullscreenElement) {
+            button.textContent = '🚪 退出全屏';
+        } else {
+            button.textContent = '🖥️ 全屏显示';
+            // 退出全屏时重新渲染
+            if (lastScreenData) {
+                updateFullFrameAsync(lastScreenData, performance.now());
+            }
+        }
+    }
 }); 
 
 // WebRTC连接统计信息
@@ -966,5 +1139,56 @@ async function getConnectionStats() {
         console.groupEnd();
     } catch (error) {
         console.error('❌ 获取连接统计失败:', error);
+    }
+} 
+
+// 全屏显示切换
+function toggleFullscreen() {
+    const remoteDesktop = document.getElementById('remoteDesktop');
+    
+    if (!document.fullscreenElement) {
+        // 进入全屏
+        if (remoteDesktop.requestFullscreen) {
+            remoteDesktop.requestFullscreen().then(() => {
+                console.log('🖥️ 已进入全屏模式');
+                showStatus('已进入全屏模式', 'success');
+                
+                // 更新按钮文本
+                const button = document.querySelector('button[onclick="toggleFullscreen()"]');
+                if (button) {
+                    button.textContent = '🚪 退出全屏';
+                }
+                
+                // 重新渲染以适应全屏尺寸
+                if (lastScreenData) {
+                    updateFullFrameAsync(lastScreenData, performance.now());
+                }
+            }).catch(error => {
+                console.error('进入全屏失败:', error);
+                showStatus('进入全屏失败', 'error');
+            });
+        } else {
+            showStatus('浏览器不支持全屏功能', 'error');
+        }
+    } else {
+        // 退出全屏
+        document.exitFullscreen().then(() => {
+            console.log('🚪 已退出全屏模式');
+            showStatus('已退出全屏模式', 'success');
+            
+            // 更新按钮文本
+            const button = document.querySelector('button[onclick="toggleFullscreen()"]');
+            if (button) {
+                button.textContent = '🖥️ 全屏显示';
+            }
+            
+            // 重新渲染以适应窗口尺寸
+            if (lastScreenData) {
+                updateFullFrameAsync(lastScreenData, performance.now());
+            }
+        }).catch(error => {
+            console.error('退出全屏失败:', error);
+            showStatus('退出全屏失败', 'error');
+        });
     }
 } 
