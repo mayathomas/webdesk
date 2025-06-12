@@ -1,411 +1,377 @@
-use anyhow::Result;
-use scrap::{Capturer, Display};
-use std::io::ErrorKind::WouldBlock;
-use std::thread;
-use std::time::Duration;
-use std::sync::{Arc, Mutex};
+use anyhow::{Result, anyhow};
+use log::{debug, error, info};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
-use crate::video_track::VideoTrackManager;
-use crate::video_encoder::{VideoEncoderConfig, VideoCodec};
+#[cfg(target_os = "windows")]
+use self::screen_capture_windows::WindowsScreenCapture;
+#[cfg(target_os = "linux")]
+use crate::screen_capture_linux::LinuxScreenCapture;
+#[cfg(target_os = "macos")]
+use crate::screen_capture_macos::MacOSScreenCapture;
 
-/// 基于视频流的屏幕捕获服务 - 模仿Chrome Remote Desktop
-pub struct VideoScreenCaptureService {
-    video_track_manager: Arc<Mutex<VideoTrackManager>>,
-    capture_config: CaptureConfig,
-    is_running: bool,
-    frame_count: u64,
+/// H.264视频流屏幕捕获服务
+/// 专门为H.264编码器优化的屏幕捕获实现
+pub struct VideoScreenCapture {
+    /// 平台特定的屏幕捕获实现
+    #[cfg(target_os = "windows")]
+    capturer: Arc<Mutex<WindowsScreenCapture>>,
+    #[cfg(target_os = "macos")]
+    capturer: Arc<Mutex<MacOSScreenCapture>>,
+    #[cfg(target_os = "linux")]
+    capturer: Arc<Mutex<LinuxScreenCapture>>,
+
+    /// 捕获配置
+    config: CaptureConfig,
+    /// 性能统计
+    stats: Arc<Mutex<CaptureStats>>,
 }
 
+/// 屏幕捕获配置
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
-    pub target_fps: u32,
-    pub max_width: u32,
-    pub max_height: u32,
-    pub quality_level: QualityLevel,
+    /// 目标分辨率
+    pub target_width: u32,
+    pub target_height: u32,
+    /// 最大帧率
+    pub max_fps: f32,
 }
 
+/// 捕获的视频帧
 #[derive(Debug, Clone)]
-pub enum QualityLevel {
-    Low,    // 低质量：快速响应
-    Medium, // 中等质量：平衡
-    High,   // 高质量：最佳视觉效果
-}
-
-impl VideoScreenCaptureService {
-    /// 创建新的视频屏幕捕获服务
-    pub fn new(video_track_manager: Arc<Mutex<VideoTrackManager>>) -> Self {
-        Self {
-            video_track_manager,
-            capture_config: CaptureConfig::default(),
-            is_running: false,
-            frame_count: 0,
-        }
-    }
-    
-    /// 启动视频捕获（生成线程）
-    pub fn start_capture_thread(&mut self) -> Result<()> {
-        if self.is_running {
-            log::warn!("📹 视频捕获已在运行");
-            return Ok(());
-        }
-        
-        log::info!("🎬 启动视频屏幕捕获线程 ({}fps)", self.capture_config.target_fps);
-        self.is_running = true;
-        
-        let video_track_manager = self.video_track_manager.clone();
-        let config = self.capture_config.clone();
-        
-        // 在专用线程中运行视频捕获（避免Send问题）
-        std::thread::spawn(move || {
-            if let Err(e) = Self::capture_loop_thread(video_track_manager, config) {
-                log::error!("❌ 视频捕获线程失败: {}", e);
-            }
-        });
-        
-        Ok(())
-    }
-    
-    /// 专用的捕获循环（在独立线程中运行）
-    fn capture_loop_thread(
-        video_track_manager: Arc<Mutex<VideoTrackManager>>,
-        config: CaptureConfig,
-    ) -> Result<()> {
-        // 获取主显示器
-        let display = Display::primary()?;
-        let mut capturer = Capturer::new(display)?;
-        
-        let original_width = capturer.width() as u32;
-        let original_height = capturer.height() as u32;
-        
-        // 计算目标分辨率
-        let target_pixels = match config.quality_level {
-            QualityLevel::Low => 1280 * 720,
-            QualityLevel::Medium => 1920 * 1080,
-            QualityLevel::High => 2560 * 1440,
-        };
-        
-        let original_pixels = original_width * original_height;
-        let (target_width, target_height) = if original_pixels <= target_pixels {
-            (original_width, original_height)
-        } else {
-            let scale_factor = (target_pixels as f32 / original_pixels as f32).sqrt();
-            let new_width = ((original_width as f32 * scale_factor) as u32 / 2) * 2;
-            let new_height = ((original_height as f32 * scale_factor) as u32 / 2) * 2;
-            (new_width, new_height)
-        };
-        
-        // 配置视频编码器
-        let encoder_config = VideoEncoderConfig {
-            width: target_width,
-            height: target_height,
-            fps: config.target_fps,
-            bitrate: Self::calculate_bitrate_static(target_width, target_height, &config.quality_level),
-            keyframe_interval: config.target_fps,
-            codec: VideoCodec::VP8,
-        };
-        
-        // 初始化视频轨道
-        {
-            let mut manager = video_track_manager.lock().unwrap();
-            let _track = manager.initialize(encoder_config)?;
-            manager.activate();
-        }
-        
-        log::info!("📺 视频流配置: {}x{}@{}fps, 编码器: VP8", target_width, target_height, config.target_fps);
-        
-        // 计算帧间隔
-        let frame_interval = Duration::from_millis(1000 / config.target_fps as u64);
-        let mut frame_count = 0u64;
-        let mut last_frame_time = std::time::Instant::now();
-        
-        // 捕获循环
-        loop {
-            let capture_start = std::time::Instant::now();
-            
-            // 捕获屏幕帧
-            let rgba_data = match Self::capture_frame_static(&mut capturer, target_width, target_height, original_width, original_height) {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("❌ 屏幕捕获失败: {}", e);
-                    std::thread::sleep(frame_interval);
-                    continue;
-                }
-            };
-            
-            // 发送到视频轨道（使用同步方式）
-            {
-                let manager = video_track_manager.lock().unwrap();
-                // 这里我们暂时跳过实际的视频帧发送，因为需要异步上下文
-                // 实际项目中需要使用通道或其他机制
-                drop(manager);
-            }
-            
-            frame_count += 1;
-            
-            // 性能统计
-            if frame_count % (config.target_fps as u64) == 0 {
-                let capture_time = capture_start.elapsed();
-                log::debug!("🎬 捕获第{}帧，耗时: {:?}", frame_count, capture_time);
-            }
-            
-            // 帧率控制
-            let elapsed = last_frame_time.elapsed();
-            if elapsed < frame_interval {
-                std::thread::sleep(frame_interval - elapsed);
-            }
-            last_frame_time = std::time::Instant::now();
-        }
-    }
-    
-    /// 静态方法：捕获帧数据
-    fn capture_frame_static(
-        capturer: &mut Capturer,
-        target_width: u32,
-        target_height: u32,
-        original_width: u32,
-        original_height: u32,
-    ) -> Result<Vec<u8>> {
-        // 捕获原始帧
-        let buffer = loop {
-            match capturer.frame() {
-                Ok(buffer) => break buffer,
-                Err(error) => {
-                    if error.kind() == WouldBlock {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    } else {
-                        return Err(anyhow::anyhow!("屏幕捕获失败: {}", error));
-                    }
-                }
-            }
-        };
-        
-        // 转换BGRA到RGBA
-        let mut rgba_data = Vec::with_capacity(buffer.len());
-        for chunk in buffer.chunks(4) {
-            if chunk.len() >= 4 {
-                rgba_data.push(chunk[2]); // R
-                rgba_data.push(chunk[1]); // G
-                rgba_data.push(chunk[0]); // B
-                rgba_data.push(chunk[3]); // A
-            }
-        }
-        
-        // 如果需要缩放
-        if target_width != original_width || target_height != original_height {
-            rgba_data = Self::resize_rgba_static(&rgba_data, original_width, original_height, target_width, target_height)?;
-        }
-        
-        Ok(rgba_data)
-    }
-    
-    /// 静态方法：调整RGBA帧大小
-    fn resize_rgba_static(
-        rgba_data: &[u8],
-        src_width: u32,
-        src_height: u32,
-        dst_width: u32,
-        dst_height: u32,
-    ) -> Result<Vec<u8>> {
-        let mut resized = Vec::with_capacity((dst_width * dst_height * 4) as usize);
-        
-        let x_ratio = src_width as f32 / dst_width as f32;
-        let y_ratio = src_height as f32 / dst_height as f32;
-        
-        for y in 0..dst_height {
-            for x in 0..dst_width {
-                let src_x = (x as f32 * x_ratio) as u32;
-                let src_y = (y as f32 * y_ratio) as u32;
-                
-                if src_x < src_width && src_y < src_height {
-                    let src_idx = ((src_y * src_width + src_x) * 4) as usize;
-                    if src_idx + 3 < rgba_data.len() {
-                        resized.push(rgba_data[src_idx]);
-                        resized.push(rgba_data[src_idx + 1]);
-                        resized.push(rgba_data[src_idx + 2]);
-                        resized.push(rgba_data[src_idx + 3]);
-                    } else {
-                        resized.extend_from_slice(&[0, 0, 0, 255]);
-                    }
-                } else {
-                    resized.extend_from_slice(&[0, 0, 0, 255]);
-                }
-            }
-        }
-        
-        Ok(resized)
-    }
-    
-    /// 静态方法：计算码率
-    fn calculate_bitrate_static(width: u32, height: u32, quality: &QualityLevel) -> u32 {
-        let pixels = width * height;
-        
-        match quality {
-            QualityLevel::Low => (pixels / 1000).max(500_000),
-            QualityLevel::Medium => (pixels / 500).max(1_000_000),
-            QualityLevel::High => (pixels / 300).max(2_000_000),
-        }
-    }
-    
-    /// 停止捕获循环
-    pub fn stop_capture(&mut self) {
-        log::info!("🛑 停止视频捕获循环");
-        self.is_running = false;
-    }
-    
-    /// 捕获单帧屏幕数据
-    fn capture_screen_frame(&self, capturer: &mut Capturer, target_width: u32, target_height: u32) -> Result<Vec<u8>> {
-        // 获取原始尺寸（在捕获之前）
-        let original_width = capturer.width() as u32;
-        let original_height = capturer.height() as u32;
-        
-        // 捕获原始帧
-        let buffer = loop {
-            match capturer.frame() {
-                Ok(buffer) => break buffer,
-                Err(error) => {
-                    if error.kind() == WouldBlock {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    } else {
-                        return Err(anyhow::anyhow!("屏幕捕获失败: {}", error));
-                    }
-                }
-            }
-        };
-        
-        // 转换BGRA到RGBA
-        let mut rgba_data = Vec::with_capacity(buffer.len());
-        for chunk in buffer.chunks(4) {
-            if chunk.len() >= 4 {
-                rgba_data.push(chunk[2]); // R
-                rgba_data.push(chunk[1]); // G  
-                rgba_data.push(chunk[0]); // B
-                rgba_data.push(chunk[3]); // A
-            }
-        }
-        
-        // 如果需要缩放
-        if target_width != original_width || target_height != original_height {
-            rgba_data = self.resize_rgba_frame(&rgba_data, original_width, original_height, target_width, target_height)?;
-        }
-        
-        Ok(rgba_data)
-    }
-    
-    /// 调整RGBA帧大小
-    fn resize_rgba_frame(
-        &self, 
-        rgba_data: &[u8], 
-        src_width: u32, 
-        src_height: u32, 
-        dst_width: u32, 
-        dst_height: u32
-    ) -> Result<Vec<u8>> {
-        // 使用简单的双线性插值缩放
-        let mut resized = Vec::with_capacity((dst_width * dst_height * 4) as usize);
-        
-        let x_ratio = src_width as f32 / dst_width as f32;
-        let y_ratio = src_height as f32 / dst_height as f32;
-        
-        for y in 0..dst_height {
-            for x in 0..dst_width {
-                let src_x = (x as f32 * x_ratio) as u32;
-                let src_y = (y as f32 * y_ratio) as u32;
-                
-                if src_x < src_width && src_y < src_height {
-                    let src_idx = ((src_y * src_width + src_x) * 4) as usize;
-                    if src_idx + 3 < rgba_data.len() {
-                        resized.push(rgba_data[src_idx]);     // R
-                        resized.push(rgba_data[src_idx + 1]); // G
-                        resized.push(rgba_data[src_idx + 2]); // B
-                        resized.push(rgba_data[src_idx + 3]); // A
-                    } else {
-                        resized.extend_from_slice(&[0, 0, 0, 255]); // 黑色像素
-                    }
-                } else {
-                    resized.extend_from_slice(&[0, 0, 0, 255]); // 黑色像素
-                }
-            }
-        }
-        
-        Ok(resized)
-    }
-    
-    /// 计算目标分辨率 - 基于Chrome Remote Desktop的策略
-    fn calculate_target_resolution(&self, original_width: u32, original_height: u32) -> (u32, u32) {
-        let max_pixels = match self.capture_config.quality_level {
-            QualityLevel::Low => 1280 * 720,    // 720p
-            QualityLevel::Medium => 1920 * 1080, // 1080p
-            QualityLevel::High => 2560 * 1440,   // 1440p
-        };
-        
-        let original_pixels = original_width * original_height;
-        
-        if original_pixels <= max_pixels {
-            return (original_width, original_height);
-        }
-        
-        // 等比例缩放
-        let scale_factor = (max_pixels as f32 / original_pixels as f32).sqrt();
-        let new_width = ((original_width as f32 * scale_factor) as u32 / 2) * 2; // 确保偶数
-        let new_height = ((original_height as f32 * scale_factor) as u32 / 2) * 2;
-        
-        (new_width, new_height)
-    }
-    
-    /// 计算目标码率
-    fn calculate_bitrate(&self, width: u32, height: u32) -> u32 {
-        let pixels = width * height;
-        
-        match self.capture_config.quality_level {
-            QualityLevel::Low => (pixels / 1000).max(500_000),    // 0.5-2 Mbps
-            QualityLevel::Medium => (pixels / 500).max(1_000_000), // 1-4 Mbps
-            QualityLevel::High => (pixels / 300).max(2_000_000),   // 2-8 Mbps
-        }
-    }
-    
-    /// 更新捕获配置
-    pub fn update_config(&mut self, config: CaptureConfig) {
-        self.capture_config = config;
-        log::info!("🔧 更新捕获配置: {}fps, {:?}", 
-            self.capture_config.target_fps, self.capture_config.quality_level);
-    }
-    
-    /// 获取捕获统计信息
-    pub async fn get_capture_stats(&self) -> CaptureStats {
-        let video_stats = {
-            let manager = self.video_track_manager.lock().unwrap();
-            manager.get_stats().await
-        };
-        
-        CaptureStats {
-            is_running: self.is_running,
-            frame_count: self.frame_count,
-            target_fps: self.capture_config.target_fps,
-            quality_level: self.capture_config.quality_level.clone(),
-            video_track_stats: video_stats,
-        }
-    }
+pub struct VideoFrame {
+    /// RGBA像素数据
+    pub data: Vec<u8>,
 }
 
 /// 捕获统计信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CaptureStats {
-    pub is_running: bool,
-    pub frame_count: u64,
-    pub target_fps: u32,
-    pub quality_level: QualityLevel,
-    pub video_track_stats: Option<crate::video_track::VideoTrackStats>,
+    pub dropped_frames: u64,
+    pub capture_errors: u64,
+}
+
+impl VideoScreenCapture {
+    /// 创建新的视频屏幕捕获服务
+    pub async fn new(config: CaptureConfig) -> Result<Self> {
+        info!(
+            "🎥 初始化视频屏幕捕获: {}x{}@{:.1}fps",
+            config.target_width, config.target_height, config.max_fps
+        );
+
+        // 创建平台特定的捕获器
+        #[cfg(target_os = "windows")]
+        let capturer = Arc::new(Mutex::new(WindowsScreenCapture::new(&config).await?));
+
+        #[cfg(target_os = "macos")]
+        let capturer = Arc::new(Mutex::new(MacOSScreenCapture::new(&config).await?));
+
+        #[cfg(target_os = "linux")]
+        let capturer = Arc::new(Mutex::new(LinuxScreenCapture::new(&config).await?));
+
+        Ok(Self {
+            capturer,
+            config,
+            stats: Arc::new(Mutex::new(CaptureStats::default())),
+        })
+    }
+
+    /// 启动连续捕获流
+    pub async fn start_capture_stream(
+        &self,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<VideoFrame>> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        #[cfg(target_os = "windows")]
+        let capturer: Arc<Mutex<WindowsScreenCapture>> = Arc::clone(&self.capturer);
+        #[cfg(target_os = "macos")]
+        let capturer: Arc<Mutex<MacOSScreenCapture>> = Arc::clone(&self.capturer);
+        #[cfg(target_os = "linux")]
+        let capturer: Arc<Mutex<LinuxScreenCapture>> = Arc::clone(&self.capturer);
+
+        let config = self.config.clone();
+        let stats = Arc::clone(&self.stats);
+
+        // 启动捕获任务
+        tokio::spawn(async move {
+            let frame_interval = Duration::from_secs_f32(1.0 / config.max_fps);
+            let mut last_capture = Instant::now();
+
+            loop {
+                let now = Instant::now();
+                let time_since_last = now.duration_since(last_capture);
+
+                // 控制帧率
+                if time_since_last < frame_interval {
+                    tokio::time::sleep(frame_interval - time_since_last).await;
+                    continue;
+                }
+
+                // 创建临时capture实例进行捕获
+                let capture_result = {
+                    let mut cap = capturer.lock().await;
+                    cap.capture_frame().await
+                };
+
+                match capture_result {
+                    Ok(raw_frame) => {
+                        let frame = VideoFrame {
+                            data: raw_frame.data,
+                        };
+
+                        if tx.send(frame).is_err() {
+                            debug!("🛑 捕获流接收者已断开连接");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ 捕获帧失败: {}", e);
+                        let mut s = stats.lock().await;
+                        s.capture_errors += 1;
+
+                        // 短暂等待后重试
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+
+                last_capture = now;
+            }
+        });
+
+        info!("✅ 视频捕获流已启动，目标FPS: {:.1}", config.max_fps);
+        Ok(rx)
+    }
+
+    /// 获取统计信息
+    pub async fn get_stats(&self) -> CaptureStats {
+        self.stats.lock().await.clone()
+    }
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            target_fps: 30,        // Chrome RD典型帧率
-            max_width: 1920,       // 最大宽度
-            max_height: 1080,      // 最大高度  
-            quality_level: QualityLevel::Medium, // 默认中等质量
+            target_width: 1920,
+            target_height: 1080,
+            max_fps: 30.0,
+        }
+    }
+}
+
+// 平台特定的屏幕捕获trait
+#[async_trait::async_trait]
+pub trait PlatformScreenCapture {
+    async fn new(config: &CaptureConfig) -> Result<Self>
+    where
+        Self: Sized;
+    async fn capture_frame(&mut self) -> Result<RawVideoFrame>;
+}
+
+/// 原始视频帧 (平台特定格式)
+#[derive(Debug, Clone)]
+pub struct RawVideoFrame {
+    pub data: Vec<u8>,
+}
+
+// 由于各平台实现较为复杂，这里先提供接口定义
+// 具体实现将在各平台专用文件中完成
+
+#[cfg(target_os = "windows")]
+mod screen_capture_windows {
+    use super::*;
+    use std::mem;
+    use std::ptr;
+    use winapi::ctypes::c_void;
+    use winapi::um::wingdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+        DIB_RGB_COLORS, GetDIBits, SRCCOPY, SelectObject,
+    };
+    use winapi::um::winuser::{GetDC, GetSystemMetrics, ReleaseDC, SM_CXSCREEN, SM_CYSCREEN};
+
+    pub struct WindowsScreenCapture {
+        screen_width: u32,
+        screen_height: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl PlatformScreenCapture for WindowsScreenCapture {
+        async fn new(_config: &CaptureConfig) -> Result<Self> {
+            unsafe {
+                let screen_width = GetSystemMetrics(SM_CXSCREEN) as u32;
+                let screen_height = GetSystemMetrics(SM_CYSCREEN) as u32;
+
+                log::info!("🖥️ Windows屏幕尺寸: {}x{}", screen_width, screen_height);
+
+                Ok(Self {
+                    screen_width,
+                    screen_height,
+                })
+            }
+        }
+
+        async fn capture_frame(&mut self) -> Result<RawVideoFrame> {
+            unsafe {
+                // 获取屏幕DC
+                let screen_dc = GetDC(ptr::null_mut());
+                if screen_dc.is_null() {
+                    return Err(anyhow!("无法获取屏幕DC"));
+                }
+
+                // 创建兼容DC
+                let mem_dc = CreateCompatibleDC(screen_dc);
+                if mem_dc.is_null() {
+                    ReleaseDC(ptr::null_mut(), screen_dc);
+                    return Err(anyhow!("无法创建兼容DC"));
+                }
+
+                // 创建兼容位图
+                let bitmap = CreateCompatibleBitmap(
+                    screen_dc,
+                    self.screen_width as i32,
+                    self.screen_height as i32,
+                );
+                if bitmap.is_null() {
+                    winapi::um::wingdi::DeleteDC(mem_dc);
+                    ReleaseDC(ptr::null_mut(), screen_dc);
+                    return Err(anyhow!("无法创建兼容位图"));
+                }
+
+                // 选择位图到DC
+                let old_bitmap = SelectObject(mem_dc, bitmap as *mut c_void);
+
+                // 执行位图传输
+                let result = BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    self.screen_width as i32,
+                    self.screen_height as i32,
+                    screen_dc,
+                    0,
+                    0,
+                    SRCCOPY,
+                );
+
+                if result == 0 {
+                    SelectObject(mem_dc, old_bitmap);
+                    winapi::um::wingdi::DeleteObject(bitmap as *mut c_void);
+                    winapi::um::wingdi::DeleteDC(mem_dc);
+                    ReleaseDC(ptr::null_mut(), screen_dc);
+                    return Err(anyhow!("BitBlt失败"));
+                }
+
+                // 准备BITMAPINFO结构
+                let mut bitmap_info: BITMAPINFO = mem::zeroed();
+                bitmap_info.bmiHeader.biSize = mem::size_of::<BITMAPINFOHEADER>() as u32;
+                bitmap_info.bmiHeader.biWidth = self.screen_width as i32;
+                bitmap_info.bmiHeader.biHeight = -(self.screen_height as i32); // 负值表示从上到下
+                bitmap_info.bmiHeader.biPlanes = 1;
+                bitmap_info.bmiHeader.biBitCount = 32; // BGRA
+                bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+                // 分配像素数据缓冲区
+                let pixel_count = (self.screen_width * self.screen_height) as usize;
+                let mut pixel_data: Vec<u8> = vec![0; pixel_count * 4]; // BGRA格式
+
+                // 获取位图数据
+                let lines_copied = GetDIBits(
+                    mem_dc,
+                    bitmap,
+                    0,
+                    self.screen_height,
+                    pixel_data.as_mut_ptr() as *mut c_void,
+                    &mut bitmap_info,
+                    DIB_RGB_COLORS,
+                );
+
+                // 清理资源
+                SelectObject(mem_dc, old_bitmap);
+                winapi::um::wingdi::DeleteObject(bitmap as *mut c_void);
+                winapi::um::wingdi::DeleteDC(mem_dc);
+                ReleaseDC(ptr::null_mut(), screen_dc);
+
+                if lines_copied == 0 {
+                    return Err(anyhow!("GetDIBits失败"));
+                }
+
+                // Windows GDI返回的是BGRA格式，需要转换为RGBA
+                let mut rgba_data = Vec::with_capacity(pixel_data.len());
+                for chunk in pixel_data.chunks(4) {
+                    if chunk.len() == 4 {
+                        // BGRA -> RGBA
+                        rgba_data.push(chunk[2]); // R
+                        rgba_data.push(chunk[1]); // G  
+                        rgba_data.push(chunk[0]); // B
+                        rgba_data.push(chunk[3]); // A
+                    }
+                }
+
+                log::debug!(
+                    "📷 成功捕获{}x{}屏幕帧 ({} bytes)",
+                    self.screen_width,
+                    self.screen_height,
+                    rgba_data.len()
+                );
+
+                Ok(RawVideoFrame { data: rgba_data })
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod screen_capture_macos {
+    use super::*;
+
+    pub struct MacOSScreenCapture {
+        config: CaptureConfig,
+    }
+
+    #[async_trait::async_trait]
+    impl PlatformScreenCapture for MacOSScreenCapture {
+        async fn new(config: &CaptureConfig) -> Result<Self> {
+            Ok(Self {
+                config: config.clone(),
+            })
+        }
+
+        async fn capture_frame(&mut self) -> Result<RawVideoFrame> {
+            // TODO: 实现macOS Screen Capture Kit
+            Err(anyhow!("macOS屏幕捕获未实现"))
+        }
+
+        async fn update_config(&mut self, config: &CaptureConfig) -> Result<()> {
+            self.config = config.clone();
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod screen_capture_linux {
+    use super::*;
+
+    pub struct LinuxScreenCapture {
+        config: CaptureConfig,
+    }
+
+    #[async_trait::async_trait]
+    impl PlatformScreenCapture for LinuxScreenCapture {
+        async fn new(config: &CaptureConfig) -> Result<Self> {
+            Ok(Self {
+                config: config.clone(),
+            })
+        }
+
+        async fn capture_frame(&mut self) -> Result<RawVideoFrame> {
+            // TODO: 实现Linux X11/Wayland屏幕捕获
+            Err(anyhow!("Linux屏幕捕获未实现"))
+        }
+
+        async fn update_config(&mut self, config: &CaptureConfig) -> Result<()> {
+            self.config = config.clone();
+            Ok(())
         }
     }
 }

@@ -78,6 +78,16 @@ pub struct KeyboardEvent {
     pub event_type: String,
 }
 
+/// 视频流配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoStreamConfig {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub bitrate: u32,
+    pub codec: String,
+}
+
 /// WebSocket消息类型（保持兼容，作为信令服务器）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -111,6 +121,12 @@ pub enum WebSocketMessage {
     MouseEvent(MouseEvent),
     KeyboardEvent(KeyboardEvent),
     
+    // 视频流控制消息
+    VideoStreamConfig { 
+        config: VideoStreamConfig
+    },
+    ForceKeyframe,
+    
     // 控制消息
     Disconnect,
     Ping,
@@ -124,7 +140,6 @@ pub enum ClientState {
     WaitingForRegistration,
     WaitingForBrowser,
     WebRTCConnecting, // 新增：WebRTC连接中
-    WebRTCConnected,  // 新增：WebRTC已连接
     Idle,
 }
 

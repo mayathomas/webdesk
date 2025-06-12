@@ -1,253 +1,215 @@
 use anyhow::Result;
+use log::{debug, warn};
+use openh264::encoder::{Encoder, EncoderConfig};
+use openh264::OpenH264API;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// 视频编解码器类型
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoCodec {
+    VP8,
+}
 
 /// 视频编码器配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VideoEncoderConfig {
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: f32,
     pub bitrate: u32,
-    pub keyframe_interval: u32,
     pub codec: VideoCodec,
+    pub quality: u8, // 0-100
 }
 
-#[derive(Debug, Clone)]
-pub enum VideoCodec {
-    VP8,
-    VP9,
-    H264,
-}
 
 /// 编码后的视频帧
 #[derive(Debug, Clone)]
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub is_keyframe: bool,
-    pub timestamp: u64,
-    pub frame_type: FrameType,
 }
 
-#[derive(Debug, Clone)]
-pub enum FrameType {
-    KeyFrame,
-    DeltaFrame,
-}
-
-/// 视频编码器 - 模仿Chrome Remote Desktop的VP8编码器
-pub struct VideoEncoder {
+/// H.264视频编码器
+pub struct H264VideoEncoder {
+    encoder: Arc<Mutex<Encoder>>,
     config: VideoEncoderConfig,
     frame_count: u64,
     last_keyframe: u64,
 }
 
-impl VideoEncoder {
-    /// 创建新的视频编码器实例
+impl H264VideoEncoder {
+    /// 创建新的H.264编码器
     pub fn new(config: VideoEncoderConfig) -> Result<Self> {
-        log::info!("🎬 初始化视频编码器: {:?}x{}@{}fps, {:?}", 
-            config.width, config.height, config.fps, config.codec);
-            
+        let encoder = Self::create_encoder(&config)?;
         Ok(Self {
+            encoder: Arc::new(Mutex::new(encoder)),
             config,
             frame_count: 0,
             last_keyframe: 0,
         })
     }
-    
-    /// 编码RGBA帧数据为视频
-    pub fn encode_frame(&mut self, rgba_data: &[u8], timestamp: u64) -> Result<EncodedFrame> {
-        self.frame_count += 1;
+
+    /// 创建配置好的编码器
+    fn create_encoder(_config: &VideoEncoderConfig) -> Result<Encoder> {
+        let api = OpenH264API::from_source();
         
-        // 决定是否为关键帧（参考Chrome RD的策略）
-        let force_keyframe = self.frame_count == 1 || 
-            (self.frame_count - self.last_keyframe) >= self.config.keyframe_interval as u64;
-            
+        // 使用openh264 0.8.1的正确API - 直接创建编码器，然后配置
+        let encoder = Encoder::with_api_config(api, EncoderConfig::new())?;
+        Ok(encoder)
+    }
+
+    /// 更新编码器配置
+    pub async fn update_config(&mut self, new_config: VideoEncoderConfig) -> Result<()> {
+        if self.config == new_config {
+            return Ok(());
+        }
+
+        // 重新创建编码器，因为openh264 0.8.1没有update_config方法
+        let new_encoder = Self::create_encoder(&new_config)?;
+        let mut encoder = self.encoder.lock().await;
+        *encoder = new_encoder;
+
+        self.config = new_config;
+        self.frame_count = 0;
+        self.last_keyframe = 0;
+        Ok(())
+    }
+
+    /// 编码RGBA帧数据为H.264格式
+    pub async fn encode_frame(&mut self, rgba_data: &[u8], _timestamp: u64) -> Result<EncodedFrame> {
+        self.frame_count += 1;
+        let width = self.config.width;
+        let height = self.config.height;
+
+        let force_keyframe = self.frame_count == 1
+            || (self.frame_count - self.last_keyframe) >= ((self.config.fps as u64) * 2);
+
         if force_keyframe {
             self.last_keyframe = self.frame_count;
+            debug!("🔑 强制生成关键帧 - 帧#{}", self.frame_count);
         }
+
+        let yuv_buffer = self.convert_rgba_to_yuv(rgba_data, width as usize, height as usize)?;
+
+        let mut encoder = self.encoder.lock().await;
+        let encoded_slice = encoder.encode(&yuv_buffer)?;
+        let frame_data = encoded_slice.to_vec();
+        let is_keyframe = self.is_keyframe(&frame_data);
         
-        let frame_type = if force_keyframe {
-            FrameType::KeyFrame
-        } else {
-            FrameType::DeltaFrame
-        };
-        
-        // 根据编码器类型编码
-        let encoded_data = match self.config.codec {
-            VideoCodec::VP8 => self.encode_vp8(rgba_data, force_keyframe)?,
-            VideoCodec::H264 => self.encode_h264(rgba_data, force_keyframe)?,
-            VideoCodec::VP9 => self.encode_vp9(rgba_data, force_keyframe)?,
-        };
-        
-        log::debug!("🎬 编码完成: 帧#{}, {}字节, {}", 
-            self.frame_count, encoded_data.len(),
-            if force_keyframe { "关键帧" } else { "差分帧" });
-        
+        if is_keyframe {
+            log::info!("✅ 成功编码I帧 (关键帧): {}字节", frame_data.len());
+        }
+
+        if frame_data.is_empty() {
+            warn!("⚠️ H.264编码器产生了空帧数据 - 帧#{}", self.frame_count);
+        }
+
+        self.validate_annex_b(&frame_data);
+
         Ok(EncodedFrame {
-            data: encoded_data,
-            is_keyframe: force_keyframe,
-            timestamp,
-            frame_type,
+            data: frame_data,
+            is_keyframe,
         })
     }
-    
-    /// 使用VP8编码器 - Chrome Remote Desktop的首选编码器
-    fn encode_vp8(&self, rgba_data: &[u8], is_keyframe: bool) -> Result<Vec<u8>> {
-        // 简化的VP8编码实现
-        // 在实际项目中，这里会使用libvpx或类似库
-        
-        // 转换RGBA到YUV420P格式（VP8要求）
-        let yuv_data = self.rgba_to_yuv420p(rgba_data)?;
-        
-        // 模拟VP8编码
-        let mut encoded = Vec::new();
-        
-        // VP8帧头
-        if is_keyframe {
-            encoded.extend_from_slice(&[0x10, 0x02, 0x00]); // VP8关键帧头
-        } else {
-            encoded.extend_from_slice(&[0x30, 0x02, 0x00]); // VP8差分帧头
+
+    /// 将RGBA数据转换为YUV I420格式
+    fn convert_rgba_to_yuv(&self, rgba_data: &[u8], width: usize, height: usize) -> Result<openh264::formats::YUVBuffer> {
+        let mut rgb_data = Vec::with_capacity(width * height * 3);
+        for chunk in rgba_data.chunks_exact(4) {
+            rgb_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2]]);
         }
+
+        // 创建临时向量来存储YUV数据
+        let y_size = width * height;
+        let u_size = (width / 2) * (height / 2);
+        let v_size = u_size;
         
-        // 简化的压缩（实际应使用VP8库）
-        let compressed = self.simple_compress(&yuv_data);
-        encoded.extend_from_slice(&compressed);
+        let mut y_data = vec![0u8; y_size];
+        let mut u_data = vec![0u8; u_size];
+        let mut v_data = vec![0u8; v_size];
         
-        Ok(encoded)
+        rgb_to_i420(&rgb_data, width as u32, height as u32, &mut y_data, &mut u_data, &mut v_data);
+        
+        // 将Y、U、V数据合并为一个向量，按照I420格式
+        let mut yuv_data = Vec::with_capacity(y_size + u_size + v_size);
+        yuv_data.extend_from_slice(&y_data);
+        yuv_data.extend_from_slice(&u_data);
+        yuv_data.extend_from_slice(&v_data);
+        
+        // 使用from_vec创建YUVBuffer
+        let yuv = openh264::formats::YUVBuffer::from_vec(yuv_data, width, height);
+        
+        Ok(yuv)
     }
-    
-    /// 使用H.264编码器
-    fn encode_h264(&self, rgba_data: &[u8], is_keyframe: bool) -> Result<Vec<u8>> {
-        // H.264编码实现
-        let yuv_data = self.rgba_to_yuv420p(rgba_data)?;
-        
-        let mut encoded = Vec::new();
-        
-        // H.264 NAL单元头
-        if is_keyframe {
-            encoded.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x67]); // SPS
-            encoded.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x68]); // PPS
-            encoded.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x65]); // IDR帧
-        } else {
-            encoded.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x61]); // P帧
-        }
-        
-        let compressed = self.simple_compress(&yuv_data);
-        encoded.extend_from_slice(&compressed);
-        
-        Ok(encoded)
-    }
-    
-    /// 使用VP9编码器
-    fn encode_vp9(&self, rgba_data: &[u8], is_keyframe: bool) -> Result<Vec<u8>> {
-        // VP9编码实现
-        let yuv_data = self.rgba_to_yuv420p(rgba_data)?;
-        
-        let mut encoded = Vec::new();
-        
-        // VP9帧头
-        if is_keyframe {
-            encoded.extend_from_slice(&[0x82, 0x49, 0x83, 0x42]); // VP9关键帧
-        } else {
-            encoded.extend_from_slice(&[0x02, 0x49, 0x83, 0x42]); // VP9差分帧
-        }
-        
-        let compressed = self.simple_compress(&yuv_data);
-        encoded.extend_from_slice(&compressed);
-        
-        Ok(encoded)
-    }
-    
-    /// 将RGBA转换为YUV420P格式
-    fn rgba_to_yuv420p(&self, rgba_data: &[u8]) -> Result<Vec<u8>> {
-        let pixel_count = (self.config.width * self.config.height) as usize;
-        let mut yuv_data = Vec::with_capacity(pixel_count * 3 / 2);
-        
-        // Y分量 (亮度)
-        let mut y_plane = Vec::with_capacity(pixel_count);
-        for chunk in rgba_data.chunks(4) {
-            if chunk.len() >= 3 {
-                let r = chunk[0] as f32;
-                let g = chunk[1] as f32;
-                let b = chunk[2] as f32;
-                
-                // ITU-R BT.601转换公式
-                let y = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-                y_plane.push(y);
-            }
-        }
-        
-        // U和V分量 (色度) - 每2x2像素采样一次
-        let chroma_width = self.config.width / 2;
-        let chroma_height = self.config.height / 2;
-        let chroma_count = (chroma_width * chroma_height) as usize;
-        
-        let mut u_plane = Vec::with_capacity(chroma_count);
-        let mut v_plane = Vec::with_capacity(chroma_count);
-        
-        for y in (0..self.config.height).step_by(2) {
-            for x in (0..self.config.width).step_by(2) {
-                let idx = (y * self.config.width + x) as usize * 4;
-                if idx + 2 < rgba_data.len() {
-                    let r = rgba_data[idx] as f32;
-                    let g = rgba_data[idx + 1] as f32;
-                    let b = rgba_data[idx + 2] as f32;
-                    
-                    let u = (-0.147 * r - 0.289 * g + 0.436 * b + 128.0) as u8;
-                    let v = (0.615 * r - 0.515 * g - 0.100 * b + 128.0) as u8;
-                    
-                    u_plane.push(u);
-                    v_plane.push(v);
+
+    /// 检查编码后的数据是否为关键帧 (IDR)
+    fn is_keyframe(&self, frame_data: &[u8]) -> bool {
+        // 简单检查是否存在NAL类型为5的单元 (IDR)
+        // H.264 Annex B格式: 00 00 00 01 [NAL Header]
+        let start_code3: [u8; 3] = [0, 0, 1];
+        let start_code4: [u8; 4] = [0, 0, 0, 1];
+
+        for (i, _) in frame_data.windows(4).enumerate() {
+            let offset = if i > 0 && frame_data[i - 1] == 0 { 3 } else { 4 };
+            if i + offset >= frame_data.len() { continue; }
+            
+            if frame_data[i..].starts_with(&start_code4) || frame_data[i..].starts_with(&start_code3) {
+                let nal_header = frame_data[i + offset];
+                let nal_type = nal_header & 0x1F;
+                if nal_type == 5 {
+                    return true;
                 }
             }
         }
-        
-        // 组合YUV平面
-        yuv_data.extend_from_slice(&y_plane);
-        yuv_data.extend_from_slice(&u_plane);
-        yuv_data.extend_from_slice(&v_plane);
-        
-        Ok(yuv_data)
+        false
     }
-    
-    /// 简单的数据压缩 (实际应使用专业编码库)
-    fn simple_compress(&self, data: &[u8]) -> Vec<u8> {
-        // 使用简单的RLE压缩作为占位符
-        let mut compressed = Vec::new();
-        
-        if data.is_empty() {
-            return compressed;
+
+    /// 验证并打印H.264 Annex B格式的NAL单元
+    fn validate_annex_b(&self, data: &[u8]) {
+        if !log::log_enabled!(log::Level::Debug) || data.is_empty() {
+            return;
         }
-        
-        let mut current_byte = data[0];
-        let mut count = 1u8;
-        
-        for &byte in data.iter().skip(1) {
-            if byte == current_byte && count < 255 {
-                count += 1;
+
+        let mut count = 0;
+        let mut i = 0;
+        while i < data.len() {
+            // Find start code
+            if let Some(start_pos) = self.find_start_code(&data[i..]) {
+                let pos = i + start_pos;
+                let nal_header_pos = pos + if pos > 0 && data[pos - 1] == 0 { 3 } else { 4 };
+                
+                if nal_header_pos < data.len() {
+                    let nal_header = data[nal_header_pos];
+                    let nal_type = nal_header & 0x1F;
+                    log::debug!(
+                        "🔍 发现 {}字节起始码，偏移{}, NAL类型{}",
+                        if nal_header_pos - pos == 4 { "4" } else { "3" },
+                        pos,
+                        nal_type
+                    );
+                    count += 1;
+                    i = nal_header_pos;
+                } else {
+                    break;
+                }
             } else {
-                compressed.push(count);
-                compressed.push(current_byte);
-                current_byte = byte;
-                count = 1;
+                break;
             }
         }
         
-        // 添加最后一组
-        compressed.push(count);
-        compressed.push(current_byte);
-        
-        compressed
+        if count > 0 {
+            log::debug!("✅ H.264 Annex B格式验证通过: 找到{}个NAL单元", count);
+        } else {
+            log::warn!("⚠️ 未在编码输出中找到H.264 Annex B起始码");
+        }
     }
-    
-    /// 更新编码器配置
-    pub fn update_config(&mut self, config: VideoEncoderConfig) -> Result<()> {
-        log::info!("🔧 更新视频编码器配置: {:?}x{}@{}fps", 
-            config.width, config.height, config.fps);
-        self.config = config;
-        Ok(())
+
+    fn find_start_code(&self, data: &[u8]) -> Option<usize> {
+        data.windows(4).position(|window| window == [0, 0, 0, 1])
+            .or_else(|| data.windows(3).position(|window| window == [0, 0, 1]))
     }
-    
-    /// 获取当前配置
+
     pub fn get_config(&self) -> &VideoEncoderConfig {
         &self.config
     }
@@ -258,10 +220,112 @@ impl Default for VideoEncoderConfig {
         Self {
             width: 1920,
             height: 1080,
-            fps: 30,
+            fps: 30.0,
             bitrate: 2000000, // 2 Mbps
-            keyframe_interval: 30, // 每30帧一个关键帧
-            codec: VideoCodec::VP8, // Chrome RD默认使用VP8
+            codec: VideoCodec::VP8, // 默认使用VP8
+            quality: 75,
+        }
+    }
+}
+
+/// 编码器工厂 - 方便创建不同配置的编码器
+pub struct VideoEncoderFactory;
+
+impl VideoEncoderFactory {
+    /// 创建高质量编码器 (适合高速网络)
+    pub fn create_high_quality(width: u32, height: u32) -> Result<H264VideoEncoder> {
+        let config = VideoEncoderConfig {
+            width,
+            height,
+            fps: 60.0,
+            bitrate: 8_000_000, // 8Mbps
+            codec: VideoCodec::VP8,
+            quality: 90,
+        };
+        H264VideoEncoder::new(config)
+    }
+
+    /// 创建标准质量编码器 (平衡性能和质量)
+    pub fn create_standard_quality(width: u32, height: u32) -> Result<H264VideoEncoder> {
+        let config = VideoEncoderConfig {
+            width,
+            height,
+            fps: 30.0,
+            bitrate: 2_000_000, // 2Mbps
+            codec: VideoCodec::VP8,
+            quality: 75,
+        };
+        H264VideoEncoder::new(config)
+    }
+
+    /// 创建低延迟编码器 (适合慢速网络)
+    pub fn create_low_latency(width: u32, height: u32) -> Result<H264VideoEncoder> {
+        let config = VideoEncoderConfig {
+            width,
+            height,
+            fps: 15.0,
+            bitrate: 500_000, // 500kbps
+            codec: VideoCodec::VP8,
+            quality: 60,
+        };
+        H264VideoEncoder::new(config)
+    }
+
+    /// 根据网络条件自动选择配置
+    pub fn create_adaptive(width: u32, height: u32, network_quality: NetworkQuality) -> Result<H264VideoEncoder> {
+        match network_quality {
+            NetworkQuality::Excellent => Self::create_high_quality(width, height),
+            NetworkQuality::Good => Self::create_standard_quality(width, height),
+            NetworkQuality::Poor => Self::create_low_latency(width, height),
+        }
+    }
+}
+
+/// 网络质量等级
+#[derive(Debug, Clone, Copy)]
+pub enum NetworkQuality {
+    Excellent, // 优秀 (>10Mbps, RTT<50ms)
+    Good,      // 良好 (1-10Mbps, RTT<200ms)
+    Poor,      // 较差 (<1Mbps, RTT>200ms)
+}
+
+/// 将RGB888 (R,G,B连续) 数据转换为 I420(YUV420 Planar)
+pub fn rgb_to_i420(rgb: &[u8], width: u32, height: u32, y_out: &mut [u8], u_out: &mut [u8], v_out: &mut [u8]) {
+    let u_width = (width / 2) as usize;
+    let u_height = (height / 2) as usize;
+    let u_size = u_width * u_height;
+    let v_size = u_size;
+    let y_size = (width * height) as usize;
+
+    if y_out.len() < y_size || u_out.len() < u_size || v_out.len() < v_size {
+        // Not enough space
+        return;
+    }
+
+    let mut y_idx = 0;
+    let mut u_idx = 0;
+    let mut v_idx = 0;
+
+    for j in 0..height {
+        for i in 0..width {
+            let r = rgb[((j * width + i) * 3) as usize] as i32;
+            let g = rgb[((j * width + i) * 3 + 1) as usize] as i32;
+            let b = rgb[((j * width + i) * 3 + 2) as usize] as i32;
+
+            let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            y_out[y_idx] = y.clamp(16, 235) as u8;
+            y_idx += 1;
+
+            if j % 2 == 0 && i % 2 == 0 {
+                let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+
+                u_out[u_idx] = u.clamp(16, 240) as u8;
+                v_out[v_idx] = v.clamp(16, 240) as u8;
+
+                u_idx += 1;
+                v_idx += 1;
+            }
         }
     }
 }

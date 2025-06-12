@@ -264,21 +264,43 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                 }
                             }
                             
-                            // 传统WebSocket消息（向后兼容）
-                            WebSocketMessage::ScreenData(screen_data) => {
-                                // 转发屏幕数据到浏览器（静默处理，不打印日志）
-                                if let Some(id) = &client_id {
-                                    if let Some(browser_tx) = state.browser_connections.get(id) {
-                                        let msg = WebSocketMessage::ScreenData(screen_data);
-                                        if let Ok(json) = serde_json::to_string(&msg) {
-                                            let _ = browser_tx.send(Message::text(json));
-                                        }
+                            // H.264视频流配置消息
+                            WebSocketMessage::VideoStreamConfig { target_id, config } => {
+                                log::info!("🎬 转发H.264视频流配置: {}x{}@{:.1}fps, {}kbps", 
+                                    config.width, config.height, config.fps, config.bitrate / 1000);
+                                    
+                                if let Some(client_tx) = state.client_connections.get(&target_id) {
+                                    let msg = WebSocketMessage::VideoStreamConfig { target_id: target_id.clone(), config };
+                                    if let Ok(json) = serde_json::to_string(&msg) {
+                                        let _ = client_tx.send(Message::text(json));
                                     }
+                                }
+                                
+                                // 标记视频流为激活状态
+                                if let Some(mut client_state) = state.clients.get_mut(&target_id) {
+                                    client_state.video_stream_active = true;
                                 }
                             }
                             
+                            // 强制关键帧消息
+                            WebSocketMessage::ForceKeyframe { target_id } => {
+                                log::info!("🔑 转发强制关键帧请求到客户端: {}", target_id);
+                                
+                                if let Some(client_tx) = state.client_connections.get(&target_id) {
+                                    let msg = WebSocketMessage::ForceKeyframe { target_id };
+                                    if let Ok(json) = serde_json::to_string(&msg) {
+                                        let _ = client_tx.send(Message::text(json));
+                                    }
+                                } else {
+                                    log::warn!("⚠️ 未找到目标客户端: {}", target_id);
+                                }
+                            }
+                            
+                            // 输入事件通过WebRTC数据通道传输 (这里只用于调试)
                             WebSocketMessage::MouseEvent(mouse_event) => {
-                                // 转发鼠标事件到客户端（静默处理）
+                                log::debug!("🖱️ 鼠标事件 (应通过WebRTC数据通道): {:?}", mouse_event);
+                                // 在实际部署中，输入事件应该通过WebRTC数据通道传输
+                                // 这里保留是为了向后兼容和调试
                                 if let Some(id) = &client_id {
                                     if let Some(client_tx) = state.client_connections.get(id) {
                                         let msg = WebSocketMessage::MouseEvent(mouse_event);
@@ -290,7 +312,8 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             }
                             
                             WebSocketMessage::KeyboardEvent(keyboard_event) => {
-                                // 转发键盘事件到客户端（静默处理）
+                                log::debug!("⌨️ 键盘事件 (应通过WebRTC数据通道): {:?}", keyboard_event);
+                                // 在实际部署中，输入事件应该通过WebRTC数据通道传输
                                 if let Some(id) = &client_id {
                                     if let Some(client_tx) = state.client_connections.get(id) {
                                         let msg = WebSocketMessage::KeyboardEvent(keyboard_event);
@@ -304,9 +327,10 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                             WebSocketMessage::Disconnect => {
                                 // 断开连接
                                 if let Some(id) = &client_id {
-                                    log::info!("🌐 连接已断开: {}", id);
+                                    log::info!("🌐 WebRTC连接已断开: {}", id);
                                     if let Some(mut client_state) = state.clients.get_mut(id) {
                                         client_state.browser_connected = false;
+                                        client_state.video_stream_active = false;
                                     }
                                     
                                     // 通知客户端浏览器已断开连接
@@ -332,7 +356,9 @@ async fn handle_websocket(ws: warp::ws::WebSocket, state: ServerState) {
                                 }
                             }
                             
-                            _ => {}
+                            _ => {
+                                log::warn!("⚠️ 收到未知消息类型");
+                            }
                         }
                     }
                 }

@@ -37,6 +37,10 @@ body {
     color: #333;
     font-size: 2.5rem;
     margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
 
 .header p {
@@ -67,15 +71,16 @@ body {
     font-weight: 600;
 }
 
-.form-group input {
+.form-group input, .form-group select {
     padding: 0.75rem;
     border: 2px solid #e0e0e0;
     border-radius: 8px;
     font-size: 1rem;
     transition: border-color 0.3s ease;
+    background: white;
 }
 
-.form-group input:focus {
+.form-group input:focus, .form-group select:focus {
     outline: none;
     border-color: #667eea;
 }
@@ -88,6 +93,7 @@ body {
     font-weight: 600;
     cursor: pointer;
     transition: all 0.3s ease;
+    margin: 0.25rem;
 }
 
 .btn-primary {
@@ -120,6 +126,36 @@ body {
     box-shadow: 0 10px 20px rgba(149, 165, 166, 0.3);
 }
 
+.btn-info {
+    background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+    color: white;
+}
+
+.btn-info:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px rgba(52, 152, 219, 0.3);
+}
+
+.btn-warning {
+    background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+    color: white;
+}
+
+.btn-warning:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px rgba(243, 156, 18, 0.3);
+}
+
+.btn-success {
+    background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+    color: white;
+}
+
+.btn-success:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px rgba(39, 174, 96, 0.3);
+}
+
 .status {
     text-align: center;
     margin: 1rem 0;
@@ -147,11 +183,38 @@ body {
     border: 1px solid #bee5eb;
 }
 
+.status.warning {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+}
+
+.connection-info {
+    display: none;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+.connection-info div {
+    padding: 0.5rem;
+    background: white;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
 .remote-desktop {
     display: none;
     text-align: center;
     flex: 1; /* 占据剩余空间 */
     overflow: hidden;
+    flex-direction: column;
 }
 
 .remote-desktop.active {
@@ -172,30 +235,38 @@ body {
     justify-content: center;
     align-items: center;
     overflow: hidden; /* 移除滚动条 */
-    min-height: 0; /* 允许flex收缩 */
+    min-height: 400px; /* 设置最小高度 */
+    min-width: 600px; /* 设置最小宽度 */
 }
 
-/* 视频流显示 */
+/* H.264视频流显示 */
 .remote-video {
     width: 100%;
     height: 100%;
+    max-width: 100%;
+    max-height: 100%;
     border: none;
     outline: none;
-    object-fit: contain; /* 保持比例，完整显示 */
+    object-fit: contain;
     background: #000;
+    border-radius: 8px;
+    display: block;
+    position: relative;
+    z-index: 1;
 }
 
-/* Canvas覆盖层用于鼠标交互 */
+/* 透明Canvas覆盖层用于H.264视频交互 */
 .desktop-overlay {
     position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
     cursor: crosshair;
     background: transparent;
     pointer-events: all;
     z-index: 10;
+    border: 2px solid rgba(102, 126, 234, 0.3);
+    border-radius: 4px;
 }
 
 /* 保持原有的canvas样式作为备用 */
@@ -210,156 +281,141 @@ body {
 }
 
 .loading {
-    padding: 2rem;
-    color: #666;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: white;
     font-size: 1.2rem;
+    z-index: 5;
 }
 
 .controls {
     display: flex;
     justify-content: center;
-    gap: 1rem;
-    padding: 1rem 0;
-    flex-shrink: 0; /* 防止被压缩 */
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    flex-shrink: 0;
 }
 
-.connection-info {
-    background: #f8f9fa;
+/* H.264视频统计面板 */
+.video-stats {
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
     border-radius: 8px;
     padding: 1rem;
     margin: 1rem 0;
-    font-family: monospace;
-    font-size: 0.9rem;
-    flex-shrink: 0; /* 防止被压缩 */
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 300px;
+    z-index: 20;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
-/* 全屏模式样式 */
+.video-stats h3 {
+    margin-bottom: 1rem;
+    color: #3498db;
+    font-size: 1.1rem;
+    text-align: center;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.stats-grid div {
+    padding: 0.25rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.stats-grid span {
+    color: #2ecc71;
+    font-weight: 600;
+}
+
+/* 全屏模式优化 */
 .desktop-container:fullscreen {
-    width: 100vw !important;
-    height: 100vh !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    border-radius: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    margin: 0;
     background: #000;
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    overflow: hidden !important;
-    position: relative !important;
 }
 
 .desktop-container:fullscreen .remote-video {
-    position: absolute !important;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    width: auto !important;
-    height: auto !important;
-    object-fit: contain !important;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
 }
 
-.desktop-container:fullscreen .desktop-screen {
-    position: absolute !important;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    width: auto !important;
-    height: auto !important;
-    object-fit: contain !important;
+.desktop-container:fullscreen .desktop-overlay {
+    width: 100vw;
+    height: 100vh;
+    border: none;
+    border-radius: 0;
 }
 
-/* 支持webkit前缀的全屏样式 */
+.desktop-container:fullscreen .video-stats {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+}
+
+/* WebKit 全屏支持 */
 .desktop-container:-webkit-full-screen {
-    width: 100vw !important;
-    height: 100vh !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    border-radius: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    margin: 0;
     background: #000;
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    overflow: hidden !important;
-    position: relative !important;
 }
 
 .desktop-container:-webkit-full-screen .remote-video {
-    position: absolute !important;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    width: auto !important;
-    height: auto !important;
-    object-fit: contain !important;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
 }
 
-.desktop-container:-webkit-full-screen .desktop-screen {
-    position: absolute !important;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    width: auto !important;
-    height: auto !important;
-    object-fit: contain !important;
+.desktop-container:-webkit-full-screen .desktop-overlay {
+    width: 100vw;
+    height: 100vh;
+    border: none;
+    border-radius: 0;
 }
 
-/* 支持moz前缀的全屏样式 */
+/* Firefox 全屏支持 */
 .desktop-container:-moz-full-screen {
-    width: 100vw !important;
-    height: 100vh !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    border-radius: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    margin: 0;
     background: #000;
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    overflow: hidden !important;
-    position: relative !important;
 }
 
 .desktop-container:-moz-full-screen .remote-video {
-    position: absolute !important;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    width: auto !important;
-    height: auto !important;
-    object-fit: contain !important;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
 }
 
-.desktop-container:-moz-full-screen .desktop-screen {
-    position: absolute !important;
-    top: 50% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    width: auto !important;
-    height: auto !important;
-    object-fit: contain !important;
+.desktop-container:-moz-full-screen .desktop-overlay {
+    width: 100vw;
+    height: 100vh;
+    border: none;
+    border-radius: 0;
 }
 
+/* 响应式设计 */
 @media (max-width: 768px) {
     .container {
+        width: 95%;
         padding: 1rem;
-        margin: 1rem;
     }
 
     .header h1 {
@@ -369,5 +425,14 @@ body {
     .controls {
         flex-direction: column;
         align-items: center;
+    }
+
+    .video-stats {
+        width: 250px;
+        font-size: 0.8rem;
+    }
+
+    .stats-grid {
+        grid-template-columns: 1fr;
     }
 } 

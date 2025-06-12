@@ -37,99 +37,114 @@ pub struct IceCandidate {
     pub sdp_mline_index: Option<u16>,
 }
 
-/// 屏幕截图数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenData {
-    pub image_data: String, // base64编码的图片数据
-    pub width: u32,          // 缩放后的宽度
-    pub height: u32,         // 缩放后的高度
-    pub original_width: u32, // 原始屏幕宽度
-    pub original_height: u32, // 原始屏幕高度
-    pub format: String, // "png", "jpeg", "diff"
-    pub full_frame: bool, // 是否为完整帧
-    pub changed_regions: Option<Vec<ChangedRegion>>, // 变化区域
-}
-
-/// 变化区域
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChangedRegion {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: String, // base64编码的区域数据
-}
-
-/// 鼠标事件
+/// 鼠标事件 (通过WebRTC数据通道传输)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseEvent {
     pub x: f64,
     pub y: f64,
-    pub button: String, // "left", "right", "middle"
+    pub button: String,     // "left", "right", "middle"
     pub event_type: String, // "click", "move", "scroll"
     pub scroll_delta: Option<i32>,
 }
 
-/// 键盘事件
+/// 键盘事件 (通过WebRTC数据通道传输)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardEvent {
     pub key: String,
     pub event_type: String, // "press", "release"
 }
 
-/// WebSocket消息类型（保持兼容，作为信令服务器）
+/// H.264视频流配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoStreamConfig {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub bitrate: u32,
+    pub codec: String, // "H264"
+}
+
+/// WebSocket消息类型 (纯WebRTC信令服务器)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebSocketMessage {
     // 客户端注册和基础消息
     Register(RegisterRequest),
     RegisterResponse(RegisterResponse),
-    
+
     // 浏览器连接消息
     BrowserConnect(BrowserConnectRequest),
-    Connected { success: bool, message: String },
-    BrowserConnected { message: String },
-    BrowserDisconnected { message: String },
-    
+    Connected {
+        success: bool,
+        message: String,
+    },
+    BrowserConnected {
+        message: String,
+    },
+    BrowserDisconnected {
+        message: String,
+    },
+
     // WebRTC 信令消息
-    WebRTCOffer { 
+    WebRTCOffer {
         target_id: String, // 目标客户端ID
-        session_description: SessionDescription 
+        session_description: SessionDescription,
     },
-    WebRTCAnswer { 
+    WebRTCAnswer {
         target_id: String, // 目标浏览器ID
-        session_description: SessionDescription 
+        session_description: SessionDescription,
     },
-    WebRTCIceCandidate { 
+    WebRTCIceCandidate {
         target_id: String, // 目标ID
-        ice_candidate: IceCandidate 
+        ice_candidate: IceCandidate,
     },
-    
-    // 传统WebSocket消息（向后兼容）
-    ScreenData(ScreenData),
+
+    // H.264视频流配置 (信令阶段)
+    VideoStreamConfig {
+        target_id: String,
+        config: VideoStreamConfig,
+    },
+
+    // 强制生成关键帧
+    ForceKeyframe {
+        target_id: String,
+    },
+
+    // 输入事件 (通过WebRTC数据通道发送，这里仅用于调试)
     MouseEvent(MouseEvent),
     KeyboardEvent(KeyboardEvent),
-    
+
     // 控制消息
     Disconnect,
     Ping,
     Pong,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// 客户端状态
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClientState {
-    pub client_id: String,
-    pub mac_address: String,
     pub auth_code: String,
     pub is_connected: bool,
     pub browser_connected: bool,
+    pub video_stream_active: bool, // H.264视频流是否激活
 }
 
 impl ClientState {
-    pub fn new(client_id: String, mac_address: String, auth_code: String, is_connected: bool, browser_connected: bool) -> Self {
-        Self { client_id, mac_address, auth_code, is_connected, browser_connected }
+    pub fn new(
+        client_id: String,
+        mac_address: String,
+        auth_code: String,
+        is_connected: bool,
+        browser_connected: bool,
+    ) -> Self {
+        Self {
+            auth_code,
+            is_connected,
+            browser_connected,
+            video_stream_active: false,
+        }
     }
-} 
+}

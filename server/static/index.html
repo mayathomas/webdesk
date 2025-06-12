@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>远程桌面控制 - WebRTC版本</title>
+    <title>远程桌面控制 - H.264视频流</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌐 远程桌面控制 (WebRTC)</h1>
-            <p>使用WebRTC P2P技术进行低延迟远程控制</p>
+            <h1>🎬 远程桌面控制 (H.264视频流)</h1>
+            <p>使用WebRTC + H.264编码进行高质量低延迟远程控制</p>
         </div>
 
         <div id="loginSection">
@@ -23,7 +23,16 @@
                     <label for="authCode">验证码:</label>
                     <input type="password" id="authCode" placeholder="请输入验证码" />
                 </div>
-                <button class="btn btn-primary" onclick="connect()">开始WebRTC连接</button>
+                <div class="form-group">
+                    <label for="videoQuality">视频质量:</label>
+                    <select id="videoQuality">
+                        <option value="low-latency">低延迟 (720p@30fps)</option>
+                        <option value="standard" selected>标准质量 (1080p@25fps)</option>
+                        <option value="high-quality">高质量 (1080p@30fps)</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" onclick="connect()">开始H.264连接</button>
+                <button class="btn" style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); color: white; margin-top: 0.5rem;" onclick="showRemoteDesktop()">🔧 测试显示远程桌面</button>
             </div>
         </div>
 
@@ -34,25 +43,42 @@
             <div>📡 信令状态: <span id="signalingState">未连接</span></div>
             <div>🧊 ICE状态: <span id="iceState">未连接</span></div>
             <div>📊 数据通道: <span id="dataChannelState">未连接</span></div>
+            <div>🎬 H.264视频: <span id="videoState">未连接</span></div>
         </div>
 
         <div id="remoteDesktop" class="remote-desktop">
             <div class="desktop-container">
-                <!-- 视频流显示 -->
-                <video id="remoteVideo" class="remote-video" autoplay muted></video>
-                <!-- Canvas用于鼠标交互 -->
+                <!-- H.264视频流显示 -->
+                <video id="remoteVideo" class="remote-video" autoplay muted playsinline>
+                    您的浏览器不支持H.264视频解码
+                </video>
+                <!-- 透明Canvas用于鼠标交互覆盖 -->
                 <canvas id="desktopCanvas" class="desktop-overlay"></canvas>
-                <div id="loading" class="loading">正在建立WebRTC视频连接...</div>
+                <div id="loading" class="loading">正在建立H.264视频连接...</div>
             </div>
             <div class="controls">
-                <button class="btn btn-secondary" onclick="toggleFullscreen()">🖥️ 全屏显示</button>
-                <button class="btn btn-info" onclick="getVideoStats()">📊 视频统计</button>
+                <button class="btn btn-secondary" onclick="toggleFullscreen()">🖥️ 全屏</button>
+                <button class="btn btn-info" onclick="getVideoStats()">📊 H.264统计</button>
+                <button class="btn btn-warning" onclick="forceKeyframe()">🔑 强制关键帧</button>
+                <button class="btn btn-success" onclick="changeVideoQuality()">🔧 调整质量</button>
+                <button class="btn" style="background: linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%); color: white;" onclick="diagnoseVideoElement()">🔍 诊断视频</button>
                 <button class="btn btn-danger" onclick="disconnect()">断开连接</button>
+            </div>
+            <div id="videoStats" class="video-stats" style="display: none;">
+                <h3>📊 H.264视频流统计</h3>
+                <div class="stats-grid">
+                    <div>编解码器: <span id="codec">H.264</span></div>
+                    <div>分辨率: <span id="resolution">-</span></div>
+                    <div>帧率: <span id="framerate">-</span></div>
+                    <div>码率: <span id="bitrate">-</span></div>
+                    <div>延迟: <span id="latency">-</span></div>
+                    <div>丢包率: <span id="packetLoss">-</span></div>
+                </div>
             </div>
         </div>
     </div>
 
-    <script src="video_stream.js"></script>
+    <script src="h264_video_stream.js"></script>
     <script src="script.js"></script>
 </body>
 </html> 

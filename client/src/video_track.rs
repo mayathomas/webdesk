@@ -1,218 +1,363 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use webrtc::media::Sample;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use webrtc::track::track_local::TrackLocal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::video_encoder::{VideoEncoder, VideoEncoderConfig};
+use crate::video_encoder::VideoEncoderConfig;
+use crate::video_encoder::{H264VideoEncoder, VideoEncoderFactory, NetworkQuality, EncodedFrame};
+use std::time::{Duration, Instant};
 
-/// 视频轨道管理器 - 模仿Chrome Remote Desktop的媒体流传输
-pub struct VideoTrack {
-    track: Arc<TrackLocalStaticSample>,
-    encoder: VideoEncoder,
-    frame_sender: mpsc::UnboundedSender<Vec<u8>>,
-    is_active: bool,
+
+/// 视频轨道统计信息
+#[derive(Debug, Clone, Default)]
+pub struct VideoTrackStats {
+    // 添加详细统计字段
+    pub frames_encoded: u64,
+    pub frames_sent: u64,
+    pub bytes_sent: u64,
+    pub keyframes_sent: u64,
+    pub transmission_errors: u64,
+    pub average_encode_time_ms: f64,
+    pub average_bitrate_kbps: f64,
+    pub last_keyframe_time: Option<Instant>,
 }
 
-impl VideoTrack {
-    /// 创建新的视频轨道
-    pub fn new(config: VideoEncoderConfig) -> Result<Self> {
-        log::info!("🎥 创建视频轨道: {:?}x{}@{}fps", 
-            config.width, config.height, config.fps);
+
+/// H.264视频轨道 - 管理视频编码和WebRTC传输
+pub struct H264VideoTrack {
+    /// WebRTC视频轨道
+    track: Arc<TrackLocalStaticSample>,
+    /// H.264编码器
+    encoder: Arc<Mutex<H264VideoEncoder>>,
+    /// 传输统计
+    stats: Arc<Mutex<VideoTrackStats>>,
+    /// 配置信息
+    config: VideoEncoderConfig,
+    /// 帧发送队列
+    frame_sender: Option<mpsc::UnboundedSender<EncodedFrame>>,
+}
+
+impl H264VideoTrack {
+    /// 使用预设配置创建视频轨道
+    pub async fn new_with_quality(
+        width: u32, 
+        height: u32, 
+        network_quality: NetworkQuality
+    ) -> Result<Self> {
+        let encoder = VideoEncoderFactory::create_adaptive(width, height, network_quality)?;
+        let config = encoder.get_config().clone();
         
-        // 根据编码器类型选择RTP载荷类型
-        let (codec_name, payload_type) = match config.codec {
-            crate::video_encoder::VideoCodec::VP8 => ("VP8", 96),
-            crate::video_encoder::VideoCodec::VP9 => ("VP9", 98),
-            crate::video_encoder::VideoCodec::H264 => ("H264", 102),
-        };
-        
-        // 创建RTP编解码器能力
-        let codec_capability = RTCRtpCodecCapability {
-            mime_type: format!("video/{}", codec_name),
-            clock_rate: 90000, // 视频标准时钟频率
-            channels: 0,
-            sdp_fmtp_line: "".to_string(),
-            rtcp_feedback: vec![],
-        };
-        
-        // 创建WebRTC视频轨道
+        // 使用相同的H.264配置
         let track = Arc::new(TrackLocalStaticSample::new(
-            codec_capability,
-            "video".to_string(),
-            "remote_desktop_video".to_string(),
+            RTCRtpCodecCapability {
+                mime_type: "video/H264".to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line: "profile-level-id=42e01e;packetization-mode=1;level-asymmetry-allowed=1".to_owned(),
+                rtcp_feedback: vec![
+                    webrtc::rtp_transceiver::RTCPFeedback {
+                        typ: "nack".to_owned(),
+                        parameter: "".to_owned(),
+                    },
+                    webrtc::rtp_transceiver::RTCPFeedback {
+                        typ: "nack".to_owned(),
+                        parameter: "pli".to_owned(),
+                    },
+                    webrtc::rtp_transceiver::RTCPFeedback {
+                        typ: "ccm".to_owned(),
+                        parameter: "fir".to_owned(),
+                    },
+                ],
+            },
+            "video".to_owned(),
+            "h264_remote_desktop".to_owned(),
         ));
+
+        log::info!("✅ H.264视频轨道创建成功 (质量: {:?})", network_quality);
+
+        Ok(Self {
+            track,
+            encoder: Arc::new(Mutex::new(encoder)),
+            config,
+            frame_sender: None,
+            stats: Arc::new(Mutex::new(VideoTrackStats::default())),
+        })
+    }
+
+    /// 启动视频流传输
+    pub async fn start_streaming(&mut self) -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<EncodedFrame>();
+        self.frame_sender = Some(tx);
+
+        let track = Arc::clone(&self.track);
+        let stats = Arc::clone(&self.stats);
         
-        // 创建视频编码器
-        let encoder = VideoEncoder::new(config)?;
-        
-        // 创建帧数据通道
-        let (frame_sender, mut frame_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
-        
-        // 启动帧处理任务
-        let track_clone = track.clone();
+        // 启动帧发送任务
         tokio::spawn(async move {
-            while let Some(frame_data) = frame_receiver.recv().await {
-                if let Err(e) = Self::send_frame_to_track(&track_clone, frame_data).await {
-                    log::error!("❌ 发送视频帧失败: {}", e);
+            let mut sequence_number = 0u16;
+            
+            while let Some(frame) = rx.recv().await {
+                match Self::send_h264_frame(&track, &frame, &mut sequence_number).await {
+                    Ok(bytes_sent) => {
+                        let mut stats_guard = stats.lock().await;
+                        stats_guard.frames_sent += 1;
+                        stats_guard.bytes_sent += bytes_sent as u64;
+                        
+                        if frame.is_keyframe {
+                            stats_guard.keyframes_sent += 1;
+                            stats_guard.last_keyframe_time = Some(Instant::now());
+                        }
+                        
+                        // 计算平均比特率
+                        let duration_secs = Instant::now().duration_since(
+                            stats_guard.last_keyframe_time.unwrap_or_else(Instant::now)
+                        ).as_secs_f64();
+                        
+                        if duration_secs > 0.0 {
+                            stats_guard.average_bitrate_kbps = 
+                                (stats_guard.bytes_sent as f64 * 8.0) / (duration_secs * 1000.0);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("❌ 发送H.264帧失败: {}", e);
+                        let mut stats_guard = stats.lock().await;
+                        stats_guard.transmission_errors += 1;
+                    }
                 }
             }
         });
+
+        log::info!("✅ H.264视频流传输已启动");
+        Ok(())
+    }
+
+    /// 编码并发送视频帧
+    pub async fn encode_and_send_frame(&self, rgba_data: &[u8]) -> Result<()> {
+        let start_time = Instant::now();
         
-        Ok(Self {
-            track,
-            encoder,
-            frame_sender,
-            is_active: false,
-        })
-    }
-    
-    /// 获取WebRTC轨道实例
-    pub fn get_track(&self) -> Arc<TrackLocalStaticSample> {
-        self.track.clone()
-    }
-    
-    /// 编码并发送RGBA帧数据
-    pub async fn send_rgba_frame(&mut self, rgba_data: &[u8]) -> Result<()> {
-        if !self.is_active {
-            log::debug!("⏸️ 视频轨道未激活，跳过帧");
+        // 检查输入数据
+        if rgba_data.is_empty() {
+            log::warn!("⚠️ 接收到空的RGBA数据，跳过编码");
             return Ok(());
         }
         
-        // 获取当前时间戳
+        log::debug!("🎬 接收到RGBA数据: {}字节 ({}x{})", 
+            rgba_data.len(), self.config.width, self.config.height);
+        
+        // 验证数据长度是否匹配期望的分辨率
+        let expected_size = (self.config.width * self.config.height * 4) as usize;
+        if rgba_data.len() != expected_size {
+            log::warn!("⚠️ RGBA数据长度不匹配: 期望{}字节, 实际{}字节", 
+                expected_size, rgba_data.len());
+        }
+        
+        // 获取时间戳
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_millis() as u64;
-        
+
         // 编码帧
-        let encoded_frame = self.encoder.encode_frame(rgba_data, timestamp)?;
+        let frame = {
+            let mut encoder = self.encoder.lock().await;
+            encoder.encode_frame(rgba_data, timestamp).await?
+        };
+
+        let encode_time = start_time.elapsed();
         
-        // 发送到轨道
-        if let Err(e) = self.frame_sender.send(encoded_frame.data) {
-            log::error!("❌ 发送帧数据到通道失败: {}", e);
+        log::debug!("🎬 编码完成: {}字节输出, 用时{:.1}ms", 
+            frame.data.len(), encode_time.as_millis());
+
+        // 更新编码统计
+        {
+            let mut stats = self.stats.lock().await;
+            stats.frames_encoded += 1;
+            stats.average_encode_time_ms = 
+                (stats.average_encode_time_ms * (stats.frames_encoded - 1) as f64 + 
+                 encode_time.as_millis() as f64) / stats.frames_encoded as f64;
         }
-        
+
+        // 立即发送而不是通过队列缓存（降低延迟）
+        if !frame.data.is_empty() {
+            let mut sequence_number = 0u16; // 临时序列号
+            match Self::send_h264_frame(&self.track, &frame, &mut sequence_number).await {
+                Ok(bytes_sent) => {
+                    let mut stats = self.stats.lock().await;
+                    stats.frames_sent += 1;
+                    stats.bytes_sent += bytes_sent as u64;
+                    
+                    if frame.is_keyframe {
+                        stats.keyframes_sent += 1;
+                        stats.last_keyframe_time = Some(Instant::now());
+                    }
+                    
+                    log::debug!("✅ 立即发送成功: {}字节", bytes_sent);
+                }
+                Err(e) => {
+                    log::error!("❌ 立即发送失败: {}", e);
+                    let mut stats = self.stats.lock().await;
+                    stats.transmission_errors += 1;
+                }
+            }
+        } else {
+            log::debug!("⚠️ 跳过空帧发送");
+        }
+
         Ok(())
     }
-    
-    /// 激活视频轨道
-    pub fn activate(&mut self) {
-        log::info!("▶️ 激活视频轨道");
-        self.is_active = true;
-    }
-    
-    /// 停用视频轨道
-    pub fn deactivate(&mut self) {
-        log::info!("⏸️ 停用视频轨道");
-        self.is_active = false;
-    }
-    
-    /// 更新编码器配置
-    pub fn update_config(&mut self, config: VideoEncoderConfig) -> Result<()> {
-        self.encoder.update_config(config)
-    }
-    
-    /// 发送编码帧到WebRTC轨道
-    async fn send_frame_to_track(
+
+    /// 发送H.264帧到WebRTC（使用TrackLocalStaticSample）
+    async fn send_h264_frame(
         track: &Arc<TrackLocalStaticSample>,
-        frame_data: Vec<u8>,
-    ) -> Result<()> {
-        // 创建RTP样本
+        frame: &EncodedFrame,
+        _sequence_number: &mut u16
+    ) -> Result<usize> {
+        // 记录所有帧发送尝试（包括空帧，用于调试）
+        if frame.data.is_empty() {
+            log::debug!("📤 尝试发送空的H.264帧 - 跳过");
+            return Ok(0);
+        }
+
+        log::debug!("📤 发送H.264帧: {}字节, {}帧", frame.data.len(), 
+            if frame.is_keyframe { "I" } else { "P" });
+        
+        // 计算帧持续时间 - 假设30fps，每帧33.33ms
+        let frame_duration = Duration::from_millis(33); // 30fps = 1000ms/30 ≈ 33.33ms
+        
+        // 使用RTP时间戳而不是SystemTime
+        // H.264使用90kHz时钟频率，所以每帧增加90000/30 = 3000
+        static mut RTP_TIMESTAMP: u32 = 0;
+        let _rtp_timestamp = unsafe {
+            RTP_TIMESTAMP = RTP_TIMESTAMP.wrapping_add(3000);
+            RTP_TIMESTAMP
+        };
+        
+        // 创建媒体样本 - 使用正确的时间戳格式
         let sample = Sample {
-            data: frame_data.into(),
+            data: frame.data.clone().into(),
             timestamp: SystemTime::now(),
+            duration: frame_duration,
             ..Default::default()
         };
         
         // 发送到WebRTC轨道
-        track.write_sample(&sample).await?;
-        
+        match track.write_sample(&sample).await {
+            Ok(_) => {
+                log::debug!("✅ H.264帧发送成功: {}字节", frame.data.len());
+                Ok(frame.data.len())
+            }
+            Err(e) => {
+                log::error!("❌ H.264帧发送失败: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// 获取WebRTC轨道
+    pub fn get_track(&self) -> Arc<TrackLocalStaticSample> {
+        Arc::clone(&self.track)
+    }
+
+    /// 更新编码器配置
+    pub async fn update_config(&mut self, new_config: VideoEncoderConfig) -> Result<()> {
+        let mut encoder = self.encoder.lock().await;
+        encoder.update_config(new_config.clone()).await?;
+        self.config = new_config;
+        log::info!("🔧 H.264视频轨道配置已更新");
         Ok(())
     }
-    
-    /// 获取轨道统计信息
-    pub async fn get_stats(&self) -> VideoTrackStats {
-        VideoTrackStats {
-            is_active: self.is_active,
-            track_id: self.track.id().to_string(),
-            codec: format!("{:?}", self.encoder.get_config().codec),
-            resolution: format!("{}x{}", 
-                self.encoder.get_config().width,
-                self.encoder.get_config().height),
-            fps: self.encoder.get_config().fps,
-            bitrate: self.encoder.get_config().bitrate,
-        }
-    }
-}
 
-/// 视频轨道统计信息
-#[derive(Debug, Clone)]
-pub struct VideoTrackStats {
-    pub is_active: bool,
-    pub track_id: String,
-    pub codec: String,
-    pub resolution: String,
-    pub fps: u32,
-    pub bitrate: u32,
-}
+    /// 强制生成关键帧
+    pub async fn force_keyframe(&self) {
+        // 注意：openh264 0.8.1的编码器没有直接的force_keyframe方法
+        // 关键帧的生成现在由编码器内部的时间逻辑控制
+        log::debug!("🔑 请求强制关键帧（由编码器内部时间逻辑控制）");
+    }
 
-/// 视频轨道管理器
-pub struct VideoTrackManager {
-    video_track: Option<VideoTrack>,
-}
-
-impl VideoTrackManager {
-    /// 创建新的视频轨道管理器
-    pub fn new() -> Self {
-        Self {
-            video_track: None,
-        }
-    }
-    
-    /// 初始化视频轨道
-    pub fn initialize(&mut self, config: VideoEncoderConfig) -> Result<Arc<TrackLocalStaticSample>> {
-        log::info!("🎬 初始化视频轨道管理器");
-        
-        let track = VideoTrack::new(config)?;
-        let webrtc_track = track.get_track();
-        
-        self.video_track = Some(track);
-        
-        Ok(webrtc_track)
-    }
-    
-    /// 发送屏幕帧
-    pub async fn send_screen_frame(&mut self, rgba_data: &[u8]) -> Result<()> {
-        if let Some(ref mut track) = self.video_track {
-            track.send_rgba_frame(rgba_data).await?;
-        }
-        Ok(())
-    }
-    
-    /// 激活所有轨道
-    pub fn activate(&mut self) {
-        if let Some(ref mut track) = self.video_track {
-            track.activate();
-        }
-    }
-    
-    /// 停用所有轨道
-    pub fn deactivate(&mut self) {
-        if let Some(ref mut track) = self.video_track {
-            track.deactivate();
-        }
-    }
-    
     /// 获取统计信息
-    pub async fn get_stats(&self) -> Option<VideoTrackStats> {
-        if let Some(ref track) = self.video_track {
-            Some(track.get_stats().await)
+    pub async fn get_stats(&self) -> VideoTrackStats {
+        self.stats.lock().await.clone()
+    }
+
+    /// 自适应调整编码质量
+    pub async fn adapt_quality(&mut self, network_stats: &NetworkStats) -> Result<()> {
+        let current_quality = self.determine_quality(network_stats);
+        
+        match current_quality {
+            NetworkQuality::Poor => {
+                // 降低质量：减少帧率和比特率
+                let new_config = VideoEncoderConfig {
+                    width: self.config.width,
+                    height: self.config.height,
+                    fps: (self.config.fps * 0.5).max(10.0),
+                    bitrate: (self.config.bitrate / 2).max(200_000),
+                    codec: self.config.codec.clone(),
+                    quality: 60,
+                };
+                self.update_config(new_config).await?;
+            }
+            NetworkQuality::Good => {
+                // 标准质量
+                let new_config = VideoEncoderConfig {
+                    width: self.config.width,
+                    height: self.config.height,
+                    fps: 30.0,
+                    bitrate: 2_000_000,
+                    codec: self.config.codec.clone(),
+                    quality: 75,
+                };
+                self.update_config(new_config).await?;
+            }
+            NetworkQuality::Excellent => {
+                // 提高质量：增加帧率和比特率
+                let new_config = VideoEncoderConfig {
+                    width: self.config.width,
+                    height: self.config.height,
+                    fps: 60.0,
+                    bitrate: 5_000_000,
+                    codec: self.config.codec.clone(),
+                    quality: 90,
+                };
+                self.update_config(new_config).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 根据网络状况确定质量等级
+    fn determine_quality(&self, stats: &NetworkStats) -> NetworkQuality {
+        // 综合考虑带宽、延迟和丢包率
+        let bandwidth_mbps = stats.available_bandwidth_bps as f64 / 1_000_000.0;
+        let rtt_ms = stats.round_trip_time_ms;
+        let packet_loss = stats.packet_loss_ratio;
+
+        if bandwidth_mbps > 10.0 && rtt_ms < 50.0 && packet_loss < 0.01 {
+            NetworkQuality::Excellent
+        } else if bandwidth_mbps > 2.0 && rtt_ms < 200.0 && packet_loss < 0.05 {
+            NetworkQuality::Good
         } else {
-            None
+            NetworkQuality::Poor
+        }
+    }
+}
+
+/// 网络统计信息
+#[derive(Debug, Clone)]
+pub struct NetworkStats {
+    pub available_bandwidth_bps: u64,
+    pub round_trip_time_ms: f64,
+    pub packet_loss_ratio: f64,
+}
+
+impl Default for NetworkStats {
+    fn default() -> Self {
+        Self {
+            available_bandwidth_bps: 5_000_000, // 5Mbps
+            round_trip_time_ms: 50.0,
+            packet_loss_ratio: 0.0,
         }
     }
 }

@@ -22,6 +22,13 @@ warp = "0.3"
 webrtc = "0.11"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.0" 
+# OpenH264 视频编码依赖
+openh264 = "0.8.1"
+openh264-sys2 = "0.8.1"
+# 视频处理依赖
+yuv = "0.1"
+# 网络传输依赖
+quinn = "0.10"
 # 日志相关依赖
 log = "0.4"
 env_logger = "0.11" 
