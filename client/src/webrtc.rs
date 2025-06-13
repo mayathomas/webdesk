@@ -114,7 +114,7 @@ impl WebRTCClient {
         };
         
         // 创建视频流管理器
-        let mut stream_manager = VideoStreamManager::new(config).await?;
+        let stream_manager = VideoStreamManager::new(config).await?;
         
         // 获取视频轨道
         let video_track = stream_manager.get_video_track().await;
@@ -132,9 +132,8 @@ impl WebRTCClient {
             }
         });
         
-        // 启动视频流 - 但暂时不发送数据
-        stream_manager.start().await?;
-        log::info!("🚀 H.264视频流已启动（待连接建立后激活）");
+        // 不要立即启动视频流，等待WebRTC连接建立后再启动
+        log::info!("🚀 H.264视频流已准备就绪（等待WebRTC连接建立后启动）");
         
         // 保存视频流管理器
         {
@@ -165,30 +164,27 @@ impl WebRTCClient {
                     log::info!("🔄 WebRTC正在连接...");
                 }
                 RTCPeerConnectionState::Connected => {
-                    log::info!("🎉 WebRTC P2P连接已建立！开始激活H.264视频流！");
+                    log::info!("🎉 WebRTC P2P连接已建立！开始启动H.264视频流！");
                     
-                    // 连接建立后，立即开始发送视频数据
+                    // 连接建立后，立即启动视频流并开始发送数据
                     tokio::spawn(async move {
                         // 稍等片刻确保连接完全稳定
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         
-                        // 检查并确保视频流管理器状态
-                        let guard = stream_manager.lock().await;
-                        if let Some(manager) = guard.as_ref() {
+                        // 获取视频流管理器并启动
+                        let mut guard = stream_manager.lock().await;
+                        if let Some(manager) = guard.as_mut() {
                             let state = manager.get_state().await;
                             log::info!("📊 连接建立后视频流状态: {:?}", state);
                             
-                            let stats = manager.get_stats().await;
-                            log::info!("📊 H.264流统计: {:.1}fps, {:.1}kbps, {}帧", 
-                                stats.average_capture_fps, 
-                                stats.average_bitrate_kbps,
-                                stats.frames_transmitted);
-                                
-                            // 激活视频轨道开始发送数据
-                            if let Err(e) = manager.activate_video_track().await {
-                                log::error!("❌ 激活视频轨道失败: {}", e);
-                            } else {
-                                log::info!("🚀 视频轨道已激活");
+                            // 如果视频流还未启动，现在启动它
+                            if matches!(state, crate::video_stream_manager::StreamState::Stopped) {
+                                log::info!("🚀 调用 VideoStreamManager::start() ...");
+                                if let Err(e) = manager.start().await {
+                                    log::error!("❌ 启动视频流失败: {}", e);
+                                    return;
+                                }
+                                log::info!("✅ H.264视频流已启动");
                             }
                             
                             // 强制生成关键帧以确保浏览器能正确解码
@@ -197,11 +193,19 @@ impl WebRTCClient {
                             } else {
                                 log::info!("🔑 已强制生成H.264关键帧");
                             }
-                                
-                            // 如果视频流未在运行，记录警告
-                            if matches!(state, crate::video_stream_manager::StreamState::Stopped) {
-                                log::warn!("⚠️ WebRTC连接已建立但视频流未启动！");
+                            
+                            // 激活视频轨道开始发送数据
+                            if let Err(e) = manager.activate_video_track().await {
+                                log::error!("❌ 激活视频轨道失败: {}", e);
+                            } else {
+                                log::info!("🚀 视频轨道已激活");
                             }
+                            
+                            let stats = manager.get_stats().await;
+                            log::info!("📊 H.264流统计: {:.1}fps, {:.1}kbps, {}帧", 
+                                stats.average_capture_fps, 
+                                stats.average_bitrate_kbps,
+                                stats.frames_transmitted);
                         } else {
                             log::error!("❌ WebRTC连接建立但视频流管理器未初始化！");
                         }

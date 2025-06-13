@@ -80,8 +80,8 @@ impl VideoScreenCapture {
     /// 启动连续捕获流
     pub async fn start_capture_stream(
         &self,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<VideoFrame>> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    ) -> Result<flume::Receiver<VideoFrame>> {
+        let (tx, rx) = flume::unbounded::<VideoFrame>();
 
         #[cfg(target_os = "windows")]
         let capturer: Arc<Mutex<WindowsScreenCapture>> = Arc::clone(&self.capturer);
@@ -120,9 +120,14 @@ impl VideoScreenCapture {
                             data: raw_frame.data,
                         };
 
-                        if tx.send(frame).is_err() {
-                            debug!("🛑 捕获流接收者已断开连接");
-                            break;
+                        match tx.send_async(frame).await {
+                            Ok(()) => {
+                                debug!("➡️ 已推送帧到 channel (async)");
+                            }
+                            Err(_) => {
+                                debug!("🛑 捕获流接收者已断开连接");
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
@@ -152,8 +157,8 @@ impl VideoScreenCapture {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            target_width: 1920,
-            target_height: 1080,
+            target_width: 1280,
+            target_height: 720,
             max_fps: 30.0,
         }
     }

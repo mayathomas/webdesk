@@ -73,9 +73,7 @@ pub enum StreamState {
 /// 流控制命令
 #[derive(Debug, Clone)]
 pub enum StreamCommand {
-
     Stop,
-
     UpdateConfig(StreamConfig),
     ForceKeyframe,
     AdaptQuality(NetworkStats),
@@ -131,7 +129,7 @@ impl VideoStreamManager {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         self.control_tx = Some(control_tx);
 
-        // 启动主流处理任务
+        // 启动流处理任务
         self.start_stream_processing_task(control_rx).await?;
 
         // 启动质量自适应任务
@@ -179,8 +177,6 @@ impl VideoStreamManager {
         Ok(())
     }
 
- 
-
     /// 强制关键帧
     pub async fn force_keyframe(&self) -> Result<()> {
         if let Some(control_tx) = &self.control_tx {
@@ -210,97 +206,111 @@ impl VideoStreamManager {
         let stats = Arc::clone(&self.stats);
         let state = Arc::clone(&self.state);
         
+        // 任务A：处理控制命令
+        let control_state = Arc::clone(&state);
+        let control_video_track = Arc::clone(&video_track);
         tokio::spawn(async move {
-            let is_paused = false;
-            let mut frame_count = 0u64;
-            let mut last_stats_update = Instant::now();
-            
-            // 启动屏幕捕获流
-            let mut capture_stream = match screen_capture.lock().await.start_capture_stream().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!("❌ 启动屏幕捕获流失败: {}", e);
-                    *state.lock().await = StreamState::Error(e.to_string());
-                    return;
-                }
-            };
-            
-            loop {
-                tokio::select! {
-                    // 处理控制命令
-                    cmd = control_rx.recv() => {
-                        match cmd {
-                            Some(StreamCommand::Stop) => {
-                                debug!("🛑 收到停止命令");
-                                break;
-                            }
-                            Some(StreamCommand::ForceKeyframe) => {
-                                debug!("🔑 收到强制关键帧命令");
-                                video_track.lock().await.force_keyframe().await;
-                            }
-                            Some(StreamCommand::UpdateConfig(_config)) => {
-                                debug!("🔧 收到配置更新命令");
-                            }
-                            Some(StreamCommand::AdaptQuality(network_stats)) => {
-                                debug!("📊 收到质量自适应命令");
-                                if let Err(e) = video_track.lock().await.adapt_quality(&network_stats).await {
-                                    warn!("⚠️ 质量自适应失败: {}", e);
-                                }
-                            }
-                            None => break,
-                        }
+            while let Some(cmd) = control_rx.recv().await {
+                match cmd {
+                    StreamCommand::Stop => {
+                        debug!("🛑 收到停止命令 (control)");
+                        break;
                     }
-                    
-                    // 处理视频帧
-                    frame = capture_stream.recv() => {
-                        if is_paused {
-                            continue;
-                        }
-                        
-                        match frame {
-                            Some(video_frame) => {
-                                frame_count += 1;
-                                
-                                // 编码并发送帧
-                                let encode_start = Instant::now();
-                                match video_track.lock().await.encode_and_send_frame(&video_frame.data).await {
-                                    Ok(()) => {
-                                        let encode_time = encode_start.elapsed();
-                                        
-                                        // 更新统计
-                                        let mut stats_guard = stats.lock().await;
-                                        stats_guard.frames_captured += 1;
-                                        stats_guard.frames_encoded += 1;
-                                        stats_guard.average_encoding_latency_ms = 
-                                            (stats_guard.average_encoding_latency_ms * 0.9) + 
-                                            (encode_time.as_millis() as f64 * 0.1);
-                                    }
-                                    Err(e) => {
-                                        error!("❌ 编码帧失败: {}", e);
-                                        let mut stats_guard = stats.lock().await;
-                                        stats_guard.encoding_errors += 1;
-                                    }
-                                }
-                                
-                                // 定期更新统计信息
-                                if last_stats_update.elapsed() > Duration::from_secs(1) {
-                                    Self::update_performance_stats(&stats, frame_count, last_stats_update).await;
-                                    last_stats_update = Instant::now();
-                                    frame_count = 0;
-                                }
-                            }
-                            None => {
-                                warn!("⚠️ 屏幕捕获流已结束");
-                                break;
-                            }
+                    StreamCommand::ForceKeyframe => {
+                        debug!("🔑 收到强制关键帧命令 (control)");
+                        control_video_track.lock().await.force_keyframe().await;
+                    }
+                    StreamCommand::UpdateConfig(_cfg) => {
+                        debug!("🔧 收到配置更新命令 (control)");
+                    }
+                    StreamCommand::AdaptQuality(network_stats) => {
+                        debug!("🔄 收到质量自适应命令 (control)");
+                        if let Err(e) = control_video_track.lock().await.adapt_quality(&network_stats).await {
+                            warn!("⚠️ 质量自适应失败: {}", e);
                         }
                     }
                 }
             }
-            
-            // 清理并设置状态为停止
-            debug!("🧹 清理视频流处理任务");
-            *state.lock().await = StreamState::Stopped;
+            debug!("🧹 控制命令处理任务结束");
+            *control_state.lock().await = StreamState::Stopped;
+        });
+
+        // 任务B：处理视频帧
+        let video_state = Arc::clone(&state);
+        let video_stats = Arc::clone(&stats);
+        tokio::spawn(async move {
+            let mut frame_count = 0u64;
+            let mut last_stats_update = Instant::now();
+
+            // 启动屏幕捕获流
+            let capture_stream = match screen_capture.lock().await.start_capture_stream().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("❌ 启动屏幕捕获流失败: {}", e);
+                    *video_state.lock().await = StreamState::Error(e.to_string());
+                    return;
+                }
+            };
+
+            while let Ok(mut video_frame) = capture_stream.recv_async().await {
+                debug!("📥 处理捕获帧，大小: {} bytes", video_frame.data.len());
+                
+                // drain: 只保留最新帧，丢弃积压的旧帧
+                while let Ok(f) = capture_stream.try_recv() { 
+                    video_frame = f; 
+                    debug!("🗑️ 丢弃积压帧，保持实时性");
+                }
+                
+                frame_count += 1;
+
+                // 编码放到阻塞线程池，避免阻塞整个async任务
+                let video_track_mutex = Arc::clone(&video_track);
+                let video_stats_clone = Arc::clone(&video_stats);
+                let frame_data = video_frame.data.clone();
+
+                // ① 在阻塞线程中执行同步编码
+                let encode_start = Instant::now();
+                match tokio::task::spawn_blocking(move || {
+                    let mut guard = video_track_mutex
+                        .blocking_lock();
+                    guard.encode_rgba_sync(&frame_data)
+                }).await {
+                    Ok(Ok(encoded_frame)) => {
+                        let encode_time = encode_start.elapsed();
+
+                        // ② 回到 async 线程发送
+                        if let Err(e) = video_track.lock().await.send_encoded_frame(&encoded_frame).await {
+                            error!("❌ 发送编码帧失败: {}", e);
+                            video_stats.lock().await.transmission_errors += 1;
+                        } else {
+                            let mut stats_guard = video_stats_clone.lock().await;
+                            stats_guard.frames_captured += 1;
+                            stats_guard.frames_encoded += 1;
+                            stats_guard.average_encoding_latency_ms =
+                                (stats_guard.average_encoding_latency_ms * 0.9)
+                                    + (encode_time.as_millis() as f64 * 0.1);
+                            debug!("✅ 编码并发送完成，用时: {:.1}ms", encode_time.as_millis());
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("❌ 编码帧失败: {}", e);
+                        video_stats_clone.lock().await.encoding_errors += 1;
+                    }
+                    Err(e) => {
+                        error!("❌ 编码任务执行失败: {}", e);
+                        video_stats_clone.lock().await.encoding_errors += 1;
+                    }
+                }
+
+                if last_stats_update.elapsed() > Duration::from_secs(1) {
+                    Self::update_performance_stats(&video_stats, frame_count, last_stats_update).await;
+                    last_stats_update = Instant::now();
+                    frame_count = 0;
+                }
+            }
+
+            warn!("⚠️ 屏幕捕获流结束，视频帧处理任务退出");
+            *video_state.lock().await = StreamState::Stopped;
         });
         
         Ok(())
