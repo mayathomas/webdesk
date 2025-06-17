@@ -73,7 +73,7 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
         }
     };
     
-    log::debug!("✅ 信令WebSocket连接已建立");
+    log::info!("✅ 信令WebSocket连接已建立");
     
     let _ = app.emit("status-update", serde_json::json!({
         "state": "WaitingForRegistration",

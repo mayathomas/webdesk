@@ -1,5 +1,6 @@
 # 信号服务器配置
 signals_server:
+  # url: "ws://115.159.125.146:3476"
   url: "ws://localhost:3476"
   reconnect_attempts: 5
   reconnect_delay: 1000  # 毫秒
