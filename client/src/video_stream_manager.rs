@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 use log::{info, debug, warn, error};
+use tokio_util::sync::CancellationToken;
 
 /// 视频流管理器 - 整合屏幕捕获、编码和传输
 pub struct VideoStreamManager {
@@ -21,6 +22,8 @@ pub struct VideoStreamManager {
     control_tx: Option<mpsc::UnboundedSender<StreamCommand>>,
     /// 流状态
     state: Arc<Mutex<StreamState>>,
+    /// 取消令牌，用于优雅停止内部任务
+    cancel_token: CancellationToken,
 }
 
 /// 流配置
@@ -105,6 +108,7 @@ impl VideoStreamManager {
             stats: Arc::new(Mutex::new(StreamStats::default())),
             control_tx: None,
             state: Arc::new(Mutex::new(StreamState::Stopped)),
+            cancel_token: CancellationToken::new(),
         })
     }
 
@@ -129,8 +133,11 @@ impl VideoStreamManager {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         self.control_tx = Some(control_tx);
 
+        // 创建新的取消令牌实例，替换旧的
+        self.cancel_token = CancellationToken::new();
+
         // 启动流处理任务
-        self.start_stream_processing_task(control_rx).await?;
+        self.start_stream_processing_task(control_rx, self.cancel_token.clone()).await?;
 
         // 启动质量自适应任务
         if self.config.adaptive_quality {
@@ -155,7 +162,10 @@ impl VideoStreamManager {
 
         info!("🛑 停止视频流传输...");
 
-        // 发送停止命令
+        // 发送取消信号
+        self.cancel_token.cancel();
+
+        // 发送停止命令以通知控制任务
         if let Some(control_tx) = &self.control_tx {
             let _ = control_tx.send(StreamCommand::Stop);
         }
@@ -200,7 +210,7 @@ impl VideoStreamManager {
     }
 
     /// 启动流处理任务
-    async fn start_stream_processing_task(&self, mut control_rx: mpsc::UnboundedReceiver<StreamCommand>) -> Result<()> {
+    async fn start_stream_processing_task(&self, mut control_rx: mpsc::UnboundedReceiver<StreamCommand>, cancel_token: CancellationToken) -> Result<()> {
         let screen_capture = Arc::clone(&self.screen_capture);
         let video_track = Arc::clone(&self.video_track);
         let stats = Arc::clone(&self.stats);
@@ -209,6 +219,7 @@ impl VideoStreamManager {
         // 任务A：处理控制命令
         let control_state = Arc::clone(&state);
         let control_video_track = Arc::clone(&video_track);
+        let cancel_ctrl = cancel_token.clone();
         tokio::spawn(async move {
             while let Some(cmd) = control_rx.recv().await {
                 match cmd {
@@ -252,60 +263,76 @@ impl VideoStreamManager {
                 }
             };
 
-            while let Ok(mut video_frame) = capture_stream.recv_async().await {
-                debug!("📥 处理捕获帧，大小: {} bytes", video_frame.data.len());
-                
-                // drain: 只保留最新帧，丢弃积压的旧帧
-                while let Ok(f) = capture_stream.try_recv() { 
-                    video_frame = f; 
-                    debug!("🗑️ 丢弃积压帧，保持实时性");
-                }
-                
-                frame_count += 1;
+            loop {
+                tokio::select! {
+                    _ = cancel_ctrl.cancelled() => {
+                        debug!("🛑 收到取消信号，退出视频帧循环");
+                        break;
+                    }
+                    recv_res = capture_stream.recv_async() => {
+                        match recv_res {
+                            Ok(mut video_frame) => {
+                                debug!("📥 处理捕获帧，大小: {} bytes", video_frame.data.len());
+                                
+                                // drain: 只保留最新帧，丢弃积压的旧帧
+                                while let Ok(f) = capture_stream.try_recv() { 
+                                    video_frame = f; 
+                                    debug!("🗑️ 丢弃积压帧，保持实时性");
+                                }
+                                
+                                frame_count += 1;
 
-                // 编码放到阻塞线程池，避免阻塞整个async任务
-                let video_track_mutex = Arc::clone(&video_track);
-                let video_stats_clone = Arc::clone(&video_stats);
-                let frame_data = video_frame.data.clone();
+                                // 编码放到阻塞线程池，避免阻塞整个async任务
+                                let video_track_mutex = Arc::clone(&video_track);
+                                let video_stats_clone = Arc::clone(&video_stats);
+                                let frame_data = video_frame.data.clone();
 
-                // ① 在阻塞线程中执行同步编码
-                let encode_start = Instant::now();
-                match tokio::task::spawn_blocking(move || {
-                    let mut guard = video_track_mutex
-                        .blocking_lock();
-                    guard.encode_rgba_sync(&frame_data)
-                }).await {
-                    Ok(Ok(encoded_frame)) => {
-                        let encode_time = encode_start.elapsed();
+                                // ① 在阻塞线程中执行同步编码
+                                let encode_start = Instant::now();
+                                match tokio::task::spawn_blocking(move || {
+                                    let mut guard = video_track_mutex
+                                        .blocking_lock();
+                                    guard.encode_rgba_sync(&frame_data)
+                                }).await {
+                                    Ok(Ok(encoded_frame)) => {
+                                        let encode_time = encode_start.elapsed();
 
-                        // ② 回到 async 线程发送
-                        if let Err(e) = video_track.lock().await.send_encoded_frame(&encoded_frame).await {
-                            error!("❌ 发送编码帧失败: {}", e);
-                            video_stats.lock().await.transmission_errors += 1;
-                        } else {
-                            let mut stats_guard = video_stats_clone.lock().await;
-                            stats_guard.frames_captured += 1;
-                            stats_guard.frames_encoded += 1;
-                            stats_guard.average_encoding_latency_ms =
-                                (stats_guard.average_encoding_latency_ms * 0.9)
-                                    + (encode_time.as_millis() as f64 * 0.1);
-                            debug!("✅ 编码并发送完成，用时: {:.1}ms", encode_time.as_millis());
+                                        // ② 回到 async 线程发送
+                                        if let Err(e) = video_track.lock().await.send_encoded_frame(&encoded_frame).await {
+                                            error!("❌ 发送编码帧失败: {}", e);
+                                            video_stats_clone.lock().await.transmission_errors += 1;
+                                        } else {
+                                            let mut stats_guard = video_stats_clone.lock().await;
+                                            stats_guard.frames_captured += 1;
+                                            stats_guard.frames_encoded += 1;
+                                            stats_guard.average_encoding_latency_ms =
+                                                (stats_guard.average_encoding_latency_ms * 0.9)
+                                                    + (encode_time.as_millis() as f64 * 0.1);
+                                            debug!("✅ 编码并发送完成，用时: {:.1}ms", encode_time.as_millis());
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("❌ 编码帧失败: {}", e);
+                                        video_stats_clone.lock().await.encoding_errors += 1;
+                                    }
+                                    Err(e) => {
+                                        error!("❌ 编码任务执行失败: {}", e);
+                                        video_stats_clone.lock().await.encoding_errors += 1;
+                                    }
+                                }
+
+                                if last_stats_update.elapsed() > Duration::from_secs(1) {
+                                    Self::update_performance_stats(&video_stats, frame_count, last_stats_update).await;
+                                    last_stats_update = Instant::now();
+                                    frame_count = 0;
+                                }
+                            }
+                            Err(_) => {
+                                debug!("🛑 捕获流已关闭，退出视频帧循环");
+                                break;
+                            }
                         }
                     }
-                    Ok(Err(e)) => {
-                        error!("❌ 编码帧失败: {}", e);
-                        video_stats_clone.lock().await.encoding_errors += 1;
-                    }
-                    Err(e) => {
-                        error!("❌ 编码任务执行失败: {}", e);
-                        video_stats_clone.lock().await.encoding_errors += 1;
-                    }
-                }
-
-                if last_stats_update.elapsed() > Duration::from_secs(1) {
-                    Self::update_performance_stats(&video_stats, frame_count, last_stats_update).await;
-                    last_stats_update = Instant::now();
-                    frame_count = 0;
                 }
             }
 
@@ -321,12 +348,20 @@ impl VideoStreamManager {
         let control_tx = self.control_tx.as_ref().unwrap().clone();
         let video_track = Arc::clone(&self.video_track);
         let adapt_interval = Duration::from_secs_f64(self.config.quality_adapt_interval);
+        let cancel_token = self.cancel_token.clone();
         
+        let cancel_adapt = cancel_token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(adapt_interval);
             
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = cancel_adapt.cancelled() => {
+                        debug!("🛑 质量自适应任务收到取消信号，退出");
+                        break;
+                    }
+                    _ = interval.tick() => {}
+                }
                 
                 // 获取网络统计信息
                 let network_stats = {

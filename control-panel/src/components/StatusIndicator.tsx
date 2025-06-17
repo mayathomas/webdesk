@@ -30,12 +30,25 @@ export function StatusIndicator({ label, status }: StatusIndicatorProps) {
     }
   }
 
+  const getTextColor = (status: string) => {
+    switch (status) {
+      case 'connected':
+        return 'text-green-300'
+      case 'connecting':
+        return 'text-yellow-300'
+      case 'error':
+        return 'text-red-300'
+      default:
+        return 'text-gray-300'
+    }
+  }
+
   return (
     <div className="flex items-center space-x-2">
-      <div className={`w-3 h-3 rounded-full ${getStatusColor(status)}`}></div>
-      <div className="text-sm">
-        <div className="text-white font-medium">{label}</div>
-        <div className="text-gray-400">{getStatusText(status)}</div>
+      <div className={`w-2 h-2 rounded-full ${getStatusColor(status)}`}></div>
+      <div className="text-xs">
+        <div className="text-white/80 font-medium">{label}</div>
+        <div className={`${getTextColor(status)} font-medium`}>{getStatusText(status)}</div>
       </div>
     </div>
   )

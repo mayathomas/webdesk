@@ -101,6 +101,7 @@ pub enum WebSocketMessage {
     Connected { success: bool, message: String },
     BrowserConnected { message: String },
     BrowserDisconnected { message: String },
+    BrowserDisconnect,
     
     // WebRTC 信令消息
     WebRTCOffer { 

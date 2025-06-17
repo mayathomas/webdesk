@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useActionState, useOptimistic } from 'react'
 import ConnectionForm from '@/components/ConnectionForm'
 import { RemoteDesktop } from '@/components/RemoteDesktop'
@@ -11,6 +11,7 @@ export default function HomePage() {
   const [isConnected, setIsConnected] = useState(false)
   const [clientId, setClientId] = useState('')
   const [authCode, setAuthCode] = useState('')
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>({
     signaling: 'disconnected',
     ice: 'disconnected',
@@ -29,15 +30,24 @@ export default function HomePage() {
     disconnect: disconnectWebRTC,
     sendVideoConfig,
     forceKeyframe,
-    sendInputEvent,
     error: connectionError,
-    videoRef
   } = useWebRTCConnection({
     onConnectionStateChange: (updater) => {
       setConnectionState(prev => updater(prev))
     },
     onConnected: () => setIsConnected(true),
-    onDisconnected: () => setIsConnected(false)
+    onDisconnected: () => {
+      setIsConnected(false)
+      setRemoteStream(null) // 清理视频流
+      // 重置连接状态
+      setConnectionState({
+        signaling: 'disconnected',
+        ice: 'disconnected',
+        dataChannel: 'disconnected',
+        video: 'disconnected'
+      })
+    },
+    onStream: (stream) => setRemoteStream(stream)
   })
 
   // React 19 - useActionState for handling async connection
@@ -67,130 +77,49 @@ export default function HomePage() {
     },
     { success: false, message: '' }
   )
-
-  const handleVideoConfigChange = useCallback((config: VideoConfig) => {
-    if (isConnected && clientId) {
-      sendVideoConfig(clientId, config)
-    }
-  }, [isConnected, clientId, sendVideoConfig])
-
-  const handleForceKeyframe = useCallback(() => {
-    if (isConnected && clientId) {
-      forceKeyframe(clientId)
-    }
-  }, [isConnected, clientId, forceKeyframe])
-
-  const handleDisconnect = useCallback(async () => {
-    await disconnectWebRTC()
-    setIsConnected(false)
-    setClientId('')
-    setAuthCode('')
-  }, [disconnectWebRTC])
+  
 
   if (isConnected) {
     return (
       <RemoteDesktop
         clientId={clientId}
         authCode={authCode}
+        connectionState={connectionState}
+        isConnected={isConnected}
+        disconnect={disconnectWebRTC}
+        sendVideoConfig={sendVideoConfig}
+        forceKeyframe={forceKeyframe}
+        connectionError={connectionError}
+        remoteStream={remoteStream}
       />
     )
   }
+
+  // 断开连接后重置连接状态提示，避免显示"连接成功"
+  const displayConnectionStatus = isConnected ? connectionStatus : { success: false, message: '' }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900">
       <div className="container mx-auto px-4 py-8">
         <header className="text-center mb-12">
           <h1 className="text-5xl font-bold text-white mb-4">
-            🎬 远程桌面控制面板
+            远程桌面控制
           </h1>
-          <p className="text-xl text-white/80 mb-2">
-            基于 React 19 + Next.js 15 的现代化远程控制解决方案
-          </p>
-          <p className="text-lg text-white/60">
-            支持 H.264 硬件编码 • WebRTC 低延迟传输 • 实时输入控制
-          </p>
         </header>
 
         <main className="max-w-4xl mx-auto">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+          <div className="grid grid-cols-1 lg:grid-cols-1 gap-8 items-start">
             {/* 连接表单 */}
             <div>
               <ConnectionForm
                 action={connectAction}
                 isConnecting={isConnecting}
-                connectionStatus={connectionStatus}
+                connectionStatus={displayConnectionStatus}
                 connectionState={optimisticConnectionState}
-        />
+              />
             </div>
-
-            {/* 功能介绍 */}
-            <div className="space-y-6">
-              <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-                <h3 className="text-xl font-semibold text-white mb-4">✨ 主要特性</h3>
-                <ul className="space-y-3 text-white/80">
-                  <li className="flex items-center">
-                    <span className="text-green-400 mr-3">🚀</span>
-                    React 19 新特性：useActionState、useOptimistic
-                  </li>
-                  <li className="flex items-center">
-                    <span className="text-blue-400 mr-3">🎬</span>
-                    H.264 硬件编码，低延迟高质量
-                  </li>
-                  <li className="flex items-center">
-                    <span className="text-purple-400 mr-3">🔗</span>
-                    WebRTC P2P 直连，端到端加密
-                  </li>
-                  <li className="flex items-center">
-                    <span className="text-yellow-400 mr-3">⚡</span>
-                    实时鼠标键盘控制
-          </li>
-                  <li className="flex items-center">
-                    <span className="text-red-400 mr-3">📊</span>
-                    实时连接状态监控
-          </li>
-                </ul>
-              </div>
-
-              <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20">
-                <h3 className="text-xl font-semibold text-white mb-4">🔧 技术栈</h3>
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <h4 className="font-semibold text-white/90 mb-2">前端</h4>
-                    <ul className="space-y-1 text-white/70">
-                      <li>• React 19.1.0</li>
-                      <li>• Next.js 15</li>
-                      <li>• TypeScript</li>
-                      <li>• Tailwind CSS</li>
-                    </ul>
-                  </div>
-                  <div>
-                    <h4 className="font-semibold text-white/90 mb-2">后端</h4>
-                    <ul className="space-y-1 text-white/70">
-                      <li>• Next.js API Routes</li>
-                      <li>• WebRTC</li>
-                      <li>• WebSocket信令</li>
-                      <li>• H.264编码</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-            </div>
+          
           </div>
-
-          {/* 错误显示 */}
-          {connectionError && (
-            <div className="mt-8 max-w-md mx-auto">
-              <div className="bg-red-500/20 border border-red-500/30 rounded-lg p-4">
-                <div className="flex items-center">
-                  <span className="text-red-400 text-xl mr-3">⚠️</span>
-                  <div>
-                    <h4 className="text-red-200 font-semibold">连接错误</h4>
-                    <p className="text-red-300 text-sm">{connectionError}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </main>
 
         {/* API 信息 */}

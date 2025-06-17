@@ -221,6 +221,23 @@ pub async fn run_remote_service(state: AppState, app: AppHandle) -> Result<()> {
                                     );
                                 }
                                 
+                                WebSocketMessage::BrowserDisconnect => {
+                                    log::debug!("🌐 浏览器已主动断开WebRTC连接");
+                                    client_state = ClientState::WaitingForBrowser;
+                                    
+                                    // 关闭WebRTC连接
+                                    if let Some(client) = webrtc_client.take() {
+                                        let _ = client.close().await;
+                                    }
+                                    
+                                    // 停止工作线程
+                                    stop_worker_threads(
+                                        &mut input_thread_handle,
+                                        &mut input_control_tx,
+                                        &mut input_event_tx,
+                                    );
+                                }
+                                
                                 // H.264视频流配置处理
                                 WebSocketMessage::VideoStreamConfig { config, .. } => {
                                     log::info!("🎬 收到H.264视频流配置: {}x{}@{:.1}fps, {}kbps", 

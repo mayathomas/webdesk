@@ -634,6 +634,8 @@ impl WebRTCClient {
 /// 处理数据通道消息（来自浏览器的控制命令）
 async fn handle_data_channel_message(_data_channel: Arc<RTCDataChannel>, msg: DataChannelMessage) {
     if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
+        log::debug!("📨 收到数据通道消息: {}", text);
+        
         if let Ok(message) = serde_json::from_str::<WebSocketMessage>(&text) {
             match message {
                 WebSocketMessage::MouseEvent(mouse_event) => {
@@ -647,6 +649,21 @@ async fn handle_data_channel_message(_data_channel: Arc<RTCDataChannel>, msg: Da
                     // 直接处理键盘事件  
                     let input_controller = crate::input::InputController::new();
                     crate::threads::handle_keyboard_event(keyboard_event, &input_controller);
+                }
+                WebSocketMessage::Disconnect => {
+                    log::info!("🛑 收到断开连接消息，立即停止H.264编码器");
+                    
+                    // 直接关闭数据通道，这将触发连接断开流程
+                    if let Err(e) = _data_channel.close().await {
+                        log::warn!("⚠️ 关闭数据通道时出现问题: {}", e);
+                    } else {
+                        log::info!("✅ 已关闭数据通道，H.264编码器将自动停止");
+                    }
+                }
+                WebSocketMessage::ForceKeyframe => {
+                    log::info!("🔑 收到强制关键帧消息");
+                    // 注意：强制关键帧功能需要通过其他机制实现
+                    // 这里暂时只记录日志，实际功能由视频流管理器处理
                 }
                 _ => {}
             }

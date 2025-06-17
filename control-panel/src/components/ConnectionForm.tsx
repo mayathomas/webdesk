@@ -67,20 +67,7 @@ export default function ConnectionForm({
             />
           </div>
 
-          <div>
-            <label htmlFor="videoQuality" className="block text-sm font-medium text-white/90 mb-2">
-              视频质量
-            </label>
-            <select
-              id="videoQuality"
-              name="videoQuality"
-              className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            >
-              <option value="720p30" className="bg-gray-800">720p 30fps (推荐)</option>
-              <option value="1080p25" className="bg-gray-800">1080p 25fps (平衡)</option>
-              <option value="1080p30" className="bg-gray-800">1080p 30fps (高质量)</option>
-            </select>
-          </div>
+      
 
           <SubmitButton />
         </form>

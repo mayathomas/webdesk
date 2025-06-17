@@ -21,6 +21,7 @@ export function useWebRTCConnection({
   onDisconnected,
   onStream = () => {}
 }: UseWebRTCConnectionProps) {
+  console.log('🔧 useWebRTCConnection 钩子初始化')
   const [error, setError] = useState<string | null>(null)
   const [webrtcConfig, setWebrtcConfig] = useState<WebRTCConfig | null>(null)
   
@@ -76,6 +77,7 @@ export function useWebRTCConnection({
         console.log('✅ WebRTC配置加载成功:', result.data)
         setWebrtcConfig(result.data)
       } else {
+        console.error('❌ WebRTC配置加载失败:', result.message)
         throw new Error(result.message || '获取WebRTC配置失败')
       }
     } catch (err) {
@@ -193,9 +195,15 @@ export function useWebRTCConnection({
         
         onConnected()
       } else if (state === 'disconnected' || state === 'failed') {
-        console.log('❌ WebRTC连接断开或失败')
-        connectedRef.current = false
-        onDisconnected()
+        console.log('❌ WebRTC连接断开或失败, 当前已连接状态:', connectedRef.current)
+        // 只有在之前已经连接成功的情况下才触发断开回调
+        // 避免连接建立过程中的瞬时状态变化导致页面跳转
+        if (connectedRef.current) {
+          connectedRef.current = false
+          onDisconnected()
+        } else {
+          console.log('🔄 忽略建立过程中的断开状态')
+        }
       }
     }
 
@@ -297,8 +305,10 @@ export function useWebRTCConnection({
     try {
       setError(null)
       console.log('🚀 开始WebRTC连接...', { clientId, authCode, videoQuality })
+      console.log('🔍 当前webrtcConfig状态:', webrtcConfig)
       
       if (!webrtcConfig) {
+        console.error('❌ WebRTC配置未加载，无法连接')
         throw new Error('WebRTC配置未加载')
       }
 
@@ -498,27 +508,70 @@ export function useWebRTCConnection({
   const disconnect = useCallback(async () => {
     console.log('🔌 断开WebRTC连接...')
     
+    // 首先通过数据通道通知客户端断开连接
+    if (dataChannelRef.current?.readyState === 'open') {
+      try {
+        console.log('📤 发送断开连接信号给客户端')
+        dataChannelRef.current.send(JSON.stringify({
+          type: 'Disconnect'
+        }))
+        // 等待一小段时间让信号发送完成
+        await new Promise(resolve => setTimeout(resolve, 100))
+      } catch (error) {
+        console.warn('⚠️ 发送断开连接信号失败:', error)
+      }
+    }
+
+    // 通过WebSocket通知服务器断开连接
+    if (websocketRef.current?.readyState === WebSocket.OPEN) {
+      try {
+        console.log('📤 发送断开连接信号给服务器')
+        websocketRef.current.send(JSON.stringify({
+          type: 'BrowserDisconnect'
+        }))
+        // 等待一小段时间让信号发送完成
+        await new Promise(resolve => setTimeout(resolve, 100))
+      } catch (error) {
+        console.warn('⚠️ 发送断开信号失败:', error)
+      }
+    }
+    
+    // 清理PeerConnection
     if (peerConnectionRef.current) {
+      // 关闭所有transceiver
+      peerConnectionRef.current.getTransceivers().forEach(transceiver => {
+        transceiver.stop()
+      })
       peerConnectionRef.current.close()
       peerConnectionRef.current = null
     }
     
+    // 清理数据通道
     if (dataChannelRef.current) {
       dataChannelRef.current.close()
       dataChannelRef.current = null
     }
     
+    // 清理WebSocket
     if (websocketRef.current) {
       websocketRef.current.close()
       websocketRef.current = null
     }
 
+    // 清理视频元素
     if (videoRef.current) {
       videoRef.current.srcObject = null
+    }
+
+    // 清理流引用
+    if (remoteStreamRef.current) {
+      remoteStreamRef.current.getTracks().forEach(track => track.stop())
+      remoteStreamRef.current = null
     }
     
     connectedRef.current = false
 
+    console.log('✅ WebRTC连接已完全断开')
     onDisconnected()
   }, [onDisconnected])
 
