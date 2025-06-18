@@ -37,7 +37,7 @@ num_cpus = "1.16"
 async-trait = "0.1"
 
 # WebRTC 相关依赖
-webrtc = "0.9"
+webrtc = {version = "0.13"}
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.0"
 

@@ -36,6 +36,7 @@ pub struct H264VideoEncoder {
     config: VideoEncoderConfig,
     frame_count: u64,
     last_keyframe: u64,
+    next_force_keyframe: bool,
 }
 
 impl H264VideoEncoder {
@@ -47,6 +48,7 @@ impl H264VideoEncoder {
             config,
             frame_count: 0,
             last_keyframe: 0,
+            next_force_keyframe: true,
         })
     }
 
@@ -73,6 +75,7 @@ impl H264VideoEncoder {
         self.config = new_config;
         self.frame_count = 0;
         self.last_keyframe = 0;
+        self.next_force_keyframe = true;
         Ok(())
     }
 
@@ -83,9 +86,11 @@ impl H264VideoEncoder {
         let height = self.config.height;
 
         let force_keyframe = self.frame_count == 1
+            || self.next_force_keyframe
             || (self.frame_count - self.last_keyframe) >= ((self.config.fps as u64) * 2);
 
-        if force_keyframe {
+        if self.next_force_keyframe {
+            self.next_force_keyframe = false;
             self.last_keyframe = self.frame_count;
             debug!("🔑 强制生成关键帧 - 帧#{}", self.frame_count);
         }
@@ -212,6 +217,11 @@ impl H264VideoEncoder {
 
     pub fn get_config(&self) -> &VideoEncoderConfig {
         &self.config
+    }
+
+    /// 请求下一帧编码为关键帧
+    pub fn request_keyframe(&mut self) {
+        self.next_force_keyframe = true;
     }
 }
 

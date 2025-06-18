@@ -114,7 +114,7 @@ impl WebRTCClient {
         };
         
         // 创建视频流管理器
-        let stream_manager = VideoStreamManager::new(config).await?;
+        let mut stream_manager = VideoStreamManager::new(config).await?;
         
         // 获取视频轨道
         let video_track = stream_manager.get_video_track().await;
@@ -132,8 +132,21 @@ impl WebRTCClient {
             }
         });
         
-        // 不要立即启动视频流，等待WebRTC连接建立后再启动
-        log::info!("🚀 H.264视频流已准备就绪（等待WebRTC连接建立后启动）");
+        // 预热：立刻以低延迟配置启动流，让编码器与捕获链路提前升温，减少首帧等待
+        // 这里使用的配置 (low_latency) 分辨率/码率较低，对CPU压力小；
+        // 真正 P2P 连接成功后，我们会在 on_peer_connection_state_change 中
+        // 调用 update_config() 切换到更高画质。
+
+        log::info!("🚀 预热 H.264 视频流 (low-latency) 以减少首帧延迟 …");
+
+        if let Err(e) = stream_manager.start().await {
+            log::warn!("⚠️ 预热启动失败: {}，将退回连接成功后再启动", e);
+        } else {
+            // 预热阶段仅强制一帧关键帧，确保浏览器一拿到轨道就能解码
+            if let Err(e) = stream_manager.force_keyframe().await {
+                log::warn!("⚠️ 预热阶段强制关键帧失败: {}", e);
+            }
+        }
         
         // 保存视频流管理器
         {
@@ -187,18 +200,22 @@ impl WebRTCClient {
                                 log::info!("✅ H.264视频流已启动");
                             }
                             
-                            // 强制生成关键帧以确保浏览器能正确解码
-                            if let Err(e) = manager.force_keyframe().await {
-                                log::error!("❌ 强制生成关键帧失败: {}", e);
-                            } else {
-                                log::info!("🔑 已强制生成H.264关键帧");
-                            }
-                            
                             // 激活视频轨道开始发送数据
                             if let Err(e) = manager.activate_video_track().await {
                                 log::error!("❌ 激活视频轨道失败: {}", e);
                             } else {
                                 log::info!("🚀 视频轨道已激活");
+                            }
+                            
+                            // 连接稳定后立即切换到高画质并发送关键帧
+                            if let Err(e) = manager.update_config(StreamConfig::high_quality()).await {
+                                log::warn!("⚠️ 切换高画质失败: {}", e);
+                            } else {
+                                log::info!("🌟 已切换至高画质 (1920x1080 30fps) ");
+                                // 再次强制关键帧，加速画质切换
+                                if let Err(e) = manager.force_keyframe().await {
+                                    log::warn!("⚠️ 切换画质后强制关键帧失败: {}", e);
+                                }
                             }
                             
                             let stats = manager.get_stats().await;

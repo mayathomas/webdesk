@@ -1,21 +1,21 @@
 # 信号服务器配置
 signals_server:
-  # url: "ws://115.159.125.146:3476"
-  url: "ws://localhost:3476"
+  url: "ws://115.159.125.146:3476"
+  # url: "ws://localhost:3476"
   reconnect_attempts: 5
   reconnect_delay: 1000  # 毫秒
 
 # WebRTC ICE服务器配置
 stun_servers:
-  # - url: "stun:115.159.125.146:3477"
-  - url: "stun:127.0.0.1:3477"
+  - url: "stun:115.159.125.146:3477"
+  # - url: "stun:127.0.0.1:3477"
   # - url: "stun:stun.l.google.com:19302"
   # - url: "stun:stun.cloudflare.com:3478"
 
 turn_servers:
   # 我们自己的TURN服务器
-  # - url: "turn:115.159.125.146:3478"
-  - url: "turn:127.0.0.1:3478"
+  - url: "turn:115.159.125.146:3478"
+  # - url: "turn:127.0.0.1:3478"
     username: "maya"
     credential: "sorrow2713"
 

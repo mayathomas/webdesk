@@ -201,9 +201,9 @@ impl H264VideoTrack {
 
     /// 强制生成关键帧
     pub async fn force_keyframe(&self) {
-        // 注意：openh264 0.8.1的编码器没有直接的force_keyframe方法
-        // 关键帧的生成现在由编码器内部的时间逻辑控制
-        log::debug!("🔑 请求强制关键帧（由编码器内部时间逻辑控制）");
+        let mut enc = self.encoder.lock().await;
+        enc.request_keyframe();
+        log::info!("🔑 已标记下一帧为关键帧");
     }
 
     /// 获取统计信息
