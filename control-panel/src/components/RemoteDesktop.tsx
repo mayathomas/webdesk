@@ -36,6 +36,7 @@ export function RemoteDesktop({
   const [videoReady, setVideoReady] = useState(false)
   const [isControlEnabled, setIsControlEnabled] = useState(false)
   const [remoteCursor, setRemoteCursor] = useState<{x:number,y:number}|null>(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const videoContainerRef = useRef<HTMLDivElement | null>(null)
   const lastMouseMoveTime = useRef(0)
@@ -149,6 +150,30 @@ export function RemoteDesktop({
       addLog('🔄 请求关键帧')
     }
   }
+
+  // 切换全屏
+  const toggleFullscreen = () => {
+    const elem = videoContainerRef.current
+    if (!elem) return
+
+    if (!document.fullscreenElement) {
+      elem.requestFullscreen?.().catch(err => console.error('进入全屏失败', err))
+    } else {
+      document.exitFullscreen?.()
+    }
+  }
+
+  // 监听全屏变化 & ESC
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(!!document.fullscreenElement)
+    }
+    document.addEventListener('fullscreenchange', handleFsChange)
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange)
+    }
+  }, [])
 
   /**
    * 计算鼠标在「实际视频区域」与「容器」中的归一化坐标。
@@ -385,6 +410,14 @@ export function RemoteDesktop({
                     }`}
                   >
                     {isControlEnabled ? '🎮 控制已启用' : '🚫 控制已禁用'}
+                  </button>
+
+                  {/* 全屏按钮 */}
+                  <button
+                    onClick={toggleFullscreen}
+                    className="bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-2 rounded-md text-sm transition-colors duration-200"
+                  >
+                    {isFullscreen ? '退出全屏' : '全屏'}
                   </button>
                 </>
               )}
