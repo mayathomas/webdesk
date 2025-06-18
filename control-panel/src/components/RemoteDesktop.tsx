@@ -461,8 +461,8 @@ export function RemoteDesktop({
             playsInline
             muted
             onPlay={() => setVideoReady(true)}
-            className="w-full h-auto object-contain pointer-events-none"
-            style={{ minHeight: '400px', maxHeight: 'calc(100vh - 180px)' }}
+            className="w-full object-contain pointer-events-none"
+            style={isFullscreen ? { width: '100%', height: '100vh' } : { minHeight: '400px', maxHeight: 'calc(100vh - 180px)', height: 'auto' }}
           />
           {!videoReady && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/50">
