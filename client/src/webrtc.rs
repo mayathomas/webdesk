@@ -636,36 +636,70 @@ async fn handle_data_channel_message(_data_channel: Arc<RTCDataChannel>, msg: Da
     if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
         log::debug!("📨 收到数据通道消息: {}", text);
         
-        if let Ok(message) = serde_json::from_str::<WebSocketMessage>(&text) {
-            match message {
-                WebSocketMessage::MouseEvent(mouse_event) => {
-                    log::debug!("🖱️ 通过WebRTC收到鼠标事件: {:?}", mouse_event);
-                    // 直接处理鼠标事件
-                    let input_controller = crate::input::InputController::new();
-                    crate::threads::handle_mouse_event(mouse_event, &input_controller);
-                }
-                WebSocketMessage::KeyboardEvent(keyboard_event) => {
-                    log::debug!("⌨️ 通过WebRTC收到键盘事件: {:?}", keyboard_event);
-                    // 直接处理键盘事件  
-                    let input_controller = crate::input::InputController::new();
-                    crate::threads::handle_keyboard_event(keyboard_event, &input_controller);
-                }
-                WebSocketMessage::Disconnect => {
-                    log::info!("🛑 收到断开连接消息，立即停止H.264编码器");
-                    
-                    // 直接关闭数据通道，这将触发连接断开流程
-                    if let Err(e) = _data_channel.close().await {
-                        log::warn!("⚠️ 关闭数据通道时出现问题: {}", e);
-                    } else {
-                        log::info!("✅ 已关闭数据通道，H.264编码器将自动停止");
+        // 首先尝试解析为通用的JSON消息
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(msg_type) = json_value.get("type").and_then(|v| v.as_str()) {
+                match msg_type {
+                    "input-event" => {
+                        if let Some(event) = json_value.get("event") {
+                            // 处理输入事件
+                            if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
+                                match event_type {
+                                    "MouseEvent" => {
+                                        if let Ok(mouse_event) = serde_json::from_value::<MouseEvent>(event.clone()) {
+                                            log::debug!("🖱️ 通过WebRTC收到鼠标事件: {:?}", mouse_event);
+                                            let input_controller = crate::input::InputController::new();
+                                            crate::threads::handle_mouse_event(mouse_event, &input_controller);
+                                        }
+                                    }
+                                    "KeyboardEvent" => {
+                                        if let Ok(keyboard_event) = serde_json::from_value::<KeyboardEvent>(event.clone()) {
+                                            log::debug!("⌨️ 通过WebRTC收到键盘事件: {:?}", keyboard_event);
+                                            let input_controller = crate::input::InputController::new();
+                                            crate::threads::handle_keyboard_event(keyboard_event, &input_controller);
+                                        }
+                                    }
+                                    _ => {
+                                        log::warn!("⚠️ 未知的输入事件类型: {}", event_type);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // 对于其他类型的消息，尝试解析为WebSocketMessage
+                        if let Ok(message) = serde_json::from_str::<WebSocketMessage>(&text) {
+                            match message {
+                                WebSocketMessage::MouseEvent(mouse_event) => {
+                                    log::debug!("🖱️ 通过WebRTC收到鼠标事件: {:?}", mouse_event);
+                                    let input_controller = crate::input::InputController::new();
+                                    crate::threads::handle_mouse_event(mouse_event, &input_controller);
+                                }
+                                WebSocketMessage::KeyboardEvent(keyboard_event) => {
+                                    log::debug!("⌨️ 通过WebRTC收到键盘事件: {:?}", keyboard_event);
+                                    let input_controller = crate::input::InputController::new();
+                                    crate::threads::handle_keyboard_event(keyboard_event, &input_controller);
+                                }
+                                WebSocketMessage::Disconnect => {
+                                    log::info!("🛑 收到断开连接消息，立即停止H.264编码器");
+                                    
+                                    // 直接关闭数据通道，这将触发连接断开流程
+                                    if let Err(e) = _data_channel.close().await {
+                                        log::warn!("⚠️ 关闭数据通道时出现问题: {}", e);
+                                    } else {
+                                        log::info!("✅ 已关闭数据通道，H.264编码器将自动停止");
+                                    }
+                                }
+                                WebSocketMessage::ForceKeyframe => {
+                                    log::info!("🔑 收到强制关键帧消息");
+                                    // 注意：强制关键帧功能需要通过其他机制实现
+                                    // 这里暂时只记录日志，实际功能由视频流管理器处理
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
-                WebSocketMessage::ForceKeyframe => {
-                    log::info!("🔑 收到强制关键帧消息");
-                    // 注意：强制关键帧功能需要通过其他机制实现
-                    // 这里暂时只记录日志，实际功能由视频流管理器处理
-                }
-                _ => {}
             }
         }
     }

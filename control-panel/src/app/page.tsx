@@ -30,6 +30,7 @@ export default function HomePage() {
     disconnect: disconnectWebRTC,
     sendVideoConfig,
     forceKeyframe,
+    sendInputEvent,
     error: connectionError,
   } = useWebRTCConnection({
     onConnectionStateChange: (updater) => {
@@ -89,6 +90,7 @@ export default function HomePage() {
         disconnect={disconnectWebRTC}
         sendVideoConfig={sendVideoConfig}
         forceKeyframe={forceKeyframe}
+        sendInputEvent={sendInputEvent}
         connectionError={connectionError}
         remoteStream={remoteStream}
       />

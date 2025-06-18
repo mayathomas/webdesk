@@ -12,6 +12,7 @@ interface RemoteDesktopProps {
   disconnect: () => Promise<void>
   sendVideoConfig: (clientId: string, config: VideoConfig) => void
   forceKeyframe: (clientId: string) => void
+  sendInputEvent: (event: any) => void
   connectionError: string | null
   remoteStream: MediaStream | null
 }
@@ -24,6 +25,7 @@ export function RemoteDesktop({
   disconnect, 
   sendVideoConfig, 
   forceKeyframe, 
+  sendInputEvent, 
   connectionError, 
   remoteStream 
 }: RemoteDesktopProps) {
@@ -32,7 +34,11 @@ export function RemoteDesktop({
   const [videoProfiles, setVideoProfiles] = useState<VideoProfile[]>([])
   const [connectionLogs, setConnectionLogs] = useState<string[]>([])
   const [videoReady, setVideoReady] = useState(false)
+  const [isControlEnabled, setIsControlEnabled] = useState(false)
+  const [remoteCursor, setRemoteCursor] = useState<{x:number,y:number}|null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const videoContainerRef = useRef<HTMLDivElement | null>(null)
+  const lastMouseMoveTime = useRef(0)
 
   // 添加连接日志
   const addLog = (message: string) => {
@@ -144,6 +150,176 @@ export function RemoteDesktop({
     }
   }
 
+  /**
+   * 计算鼠标在「实际视频区域」与「容器」中的归一化坐标。
+   * - remoteX/remoteY: 以视频有效像素区域左上角为(0,0)，右下角为(1,1)
+   * - displayX/displayY: 以外层容器左上角为(0,0)，右下角为(1,1)，用于本地光标渲染
+   * 这样既能保证发送给远端的坐标准确，也能让本地光标在 letter-box 情况下对齐。
+   */
+  const getCoordinates = (event: React.MouseEvent<HTMLDivElement>) => {
+    const containerRect = videoContainerRef.current?.getBoundingClientRect()
+    const videoRect = videoRef.current?.getBoundingClientRect()
+
+    if (!containerRect || !videoRect) {
+      return { remoteX: 0, remoteY: 0, displayX: 0, displayY: 0 }
+    }
+
+    // 视频的实际像素尺寸
+    const intrinsicW = videoRef.current?.videoWidth || videoRect.width
+    const intrinsicH = videoRef.current?.videoHeight || videoRect.height
+
+    const aspectIntrinsic = intrinsicW / intrinsicH
+    const aspectDisplayed = videoRect.width / videoRect.height
+
+    // 计算内部有效图像区域（去掉object-contain产生的黑边）
+    let imgDisplayW = 0
+    let imgDisplayH = 0
+    let imgOffsetX = 0
+    let imgOffsetY = 0
+
+    if (aspectDisplayed > aspectIntrinsic) {
+      // 左右有黑边
+      imgDisplayH = videoRect.height
+      imgDisplayW = imgDisplayH * aspectIntrinsic
+      imgOffsetX = (videoRect.width - imgDisplayW) / 2
+    } else {
+      // 上下有黑边
+      imgDisplayW = videoRect.width
+      imgDisplayH = imgDisplayW / aspectIntrinsic
+      imgOffsetY = (videoRect.height - imgDisplayH) / 2
+    }
+
+    // 计算基于图片区域的坐标
+    const imgX = event.clientX - videoRect.left - imgOffsetX
+    const imgY = event.clientY - videoRect.top - imgOffsetY
+
+    const remoteX = Math.max(0, Math.min(1, imgX / imgDisplayW))
+    const remoteY = Math.max(0, Math.min(1, imgY / imgDisplayH))
+
+    // 显示用：转换到容器百分比
+    const displayX = (videoRect.left - containerRect.left + imgOffsetX + remoteX * imgDisplayW) / containerRect.width
+    const displayY = (videoRect.top - containerRect.top + imgOffsetY + remoteY * imgDisplayH) / containerRect.height
+
+    return { remoteX, remoteY, displayX, displayY }
+  }
+
+  // 鼠标事件处理
+  const handleMouseMove = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isControlEnabled || !isConnected) return
+    
+    // 节流处理：限制鼠标移动事件的发送频率（每16ms最多发送一次，约60fps）
+    const now = Date.now()
+    if (now - lastMouseMoveTime.current < 16) return
+    lastMouseMoveTime.current = now
+    
+    const { remoteX, remoteY, displayX, displayY } = getCoordinates(event)
+    const mouseEvent = {
+      type: 'MouseEvent',
+      x: remoteX,
+      y: remoteY,
+      button: 'none',
+      event_type: 'move'
+    }
+    sendInputEvent(mouseEvent)
+
+    // 更新本地光标位置用于显示
+    setRemoteCursor({ x: displayX, y: displayY })
+  }, [isControlEnabled, isConnected, sendInputEvent])
+
+  const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isControlEnabled || !isConnected) return
+    
+    event.preventDefault()
+    const { remoteX, remoteY } = getCoordinates(event)
+    const button = event.button === 0 ? 'left' : event.button === 1 ? 'middle' : 'right'
+    
+    const mouseEvent = {
+      type: 'MouseEvent',
+      x: remoteX,
+      y: remoteY,
+      button,
+      event_type: 'press'
+    }
+    sendInputEvent(mouseEvent)
+  }, [isControlEnabled, isConnected, sendInputEvent])
+
+  const handleMouseUp = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isControlEnabled || !isConnected) return
+    
+    event.preventDefault()
+    const { remoteX, remoteY } = getCoordinates(event)
+    const button = event.button === 0 ? 'left' : event.button === 1 ? 'middle' : 'right'
+    
+    const mouseEvent = {
+      type: 'MouseEvent',
+      x: remoteX,
+      y: remoteY,
+      button,
+      event_type: 'release'
+    }
+    sendInputEvent(mouseEvent)
+  }, [isControlEnabled, isConnected, sendInputEvent])
+
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (!isControlEnabled || !isConnected) return
+    
+    event.preventDefault()
+    // 将滚轮事件转换为鼠标事件，使用scroll_delta
+    const { remoteX, remoteY } = getCoordinates(event)
+    const mouseEvent = {
+      type: 'MouseEvent',
+      x: remoteX,
+      y: remoteY,
+      button: 'wheel',
+      event_type: 'scroll',
+      scroll_delta: event.deltaY > 0 ? -1 : 1  // 标准化滚动方向
+    }
+    sendInputEvent(mouseEvent)
+  }, [isControlEnabled, isConnected, sendInputEvent])
+
+  // 键盘事件处理
+  const handleKeyDown = useCallback((event: KeyboardEvent) => {
+    if (!isControlEnabled || !isConnected) return
+    
+    event.preventDefault()
+    const keyboardEvent = {
+      type: 'KeyboardEvent',
+      key: event.code,
+      event_type: 'press'
+    }
+    sendInputEvent(keyboardEvent)
+  }, [isControlEnabled, isConnected, sendInputEvent])
+
+  const handleKeyUp = useCallback((event: KeyboardEvent) => {
+    if (!isControlEnabled || !isConnected) return
+    
+    event.preventDefault()
+    const keyboardEvent = {
+      type: 'KeyboardEvent',
+      key: event.code,
+      event_type: 'release'
+    }
+    sendInputEvent(keyboardEvent)
+  }, [isControlEnabled, isConnected, sendInputEvent])
+
+  // 添加/移除键盘事件监听器
+  useEffect(() => {
+    if (isControlEnabled && isConnected) {
+      document.addEventListener('keydown', handleKeyDown)
+      document.addEventListener('keyup', handleKeyUp)
+      
+      return () => {
+        document.removeEventListener('keydown', handleKeyDown)
+        document.removeEventListener('keyup', handleKeyUp)
+      }
+    }
+  }, [isControlEnabled, isConnected, handleKeyDown, handleKeyUp])
+
+  const toggleControl = () => {
+    setIsControlEnabled(prev => !prev)
+    addLog(isControlEnabled ? '🚫 远程控制已禁用' : '🎮 远程控制已启用')
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-4">
       <div className="max-w-7xl mx-auto space-y-4">
@@ -199,6 +375,17 @@ export function RemoteDesktop({
                   >
                     刷新画面
                   </button>
+
+                  <button
+                    onClick={toggleControl}
+                    className={`px-3 py-2 rounded-md text-sm transition-colors duration-200 ${
+                      isControlEnabled 
+                        ? 'bg-green-500 hover:bg-green-600 text-white' 
+                        : 'bg-gray-500 hover:bg-gray-600 text-white'
+                    }`}
+                  >
+                    {isControlEnabled ? '🎮 控制已启用' : '🚫 控制已禁用'}
+                  </button>
                 </>
               )}
               
@@ -223,14 +410,25 @@ export function RemoteDesktop({
         </div>
 
         {/* 视频显示区域 */}
-        <div className="relative bg-black rounded-lg overflow-hidden border border-white/20 shadow-2xl">
+        <div 
+          ref={videoContainerRef}
+          className={`relative bg-black rounded-lg overflow-hidden border border-white/20 shadow-2xl ${
+            isControlEnabled ? 'cursor-none' : 'cursor-default'
+          }`}
+          onMouseMove={handleMouseMove}
+          onMouseDown={handleMouseDown}
+          onMouseUp={handleMouseUp}
+          onWheel={handleWheel}
+          onContextMenu={(e) => e.preventDefault()}
+          tabIndex={isControlEnabled ? 0 : -1} // 使div能够获得焦点以接收键盘事件
+        >
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
             onPlay={() => setVideoReady(true)}
-            className="w-full h-auto object-contain"
+            className="w-full h-auto object-contain pointer-events-none"
             style={{ minHeight: '400px', maxHeight: 'calc(100vh - 180px)' }}
           />
           {!videoReady && (
@@ -242,6 +440,30 @@ export function RemoteDesktop({
                 </p>
               </div>
             </div>
+          )}
+          
+          {/* 控制状态指示 */}
+          {isControlEnabled && (
+            <div className="absolute top-4 right-4 bg-green-500/80 text-white px-3 py-1 rounded-full text-sm">
+              🎮 远程控制已启用
+            </div>
+          )}
+
+          {/* 远程鼠标光标可视化 */}
+          {remoteCursor && isControlEnabled && (
+            <div
+              className="absolute w-4 h-4 pointer-events-none select-none"
+              style={{
+                left: `${remoteCursor.x * 100}%`,
+                top: `${remoteCursor.y * 100}%`,
+                transform: 'translate(0, 0)',
+                width: '16px',
+                height: '16px',
+                backgroundImage: 'url("data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'16\' height=\'16\' viewBox=\'0 0 16 16\'><path d=\'M1 1 L1 10 L4 7 L7 15 L9 14 L6 6 L10 6 Z\' fill=\'white\' stroke=\'black\' stroke-width=\'0.5\'/></svg>")',
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: '16px 16px'
+              }}
+            />
           )}
         </div>
       </div>
