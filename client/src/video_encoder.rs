@@ -84,11 +84,7 @@ impl H264VideoEncoder {
         self.frame_count += 1;
         let width = self.config.width;
         let height = self.config.height;
-
-        let force_keyframe = self.frame_count == 1
-            || self.next_force_keyframe
-            || (self.frame_count - self.last_keyframe) >= ((self.config.fps as u64) * 2);
-
+        
         if self.next_force_keyframe {
             self.next_force_keyframe = false;
             self.last_keyframe = self.frame_count;

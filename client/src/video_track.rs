@@ -1,14 +1,18 @@
 use anyhow::Result;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::{Mutex, mpsc};
-use webrtc::media::Sample;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::rtp::packetizer::{new_packetizer, Packetizer};
+use webrtc::rtp::codecs::h264::H264Payloader;
+use webrtc::rtp::packet::Packet as RtpPacket;
+use webrtc::rtp::sequence::new_random_sequencer;
+use webrtc::track::track_local::TrackLocalWriter;
+use bytes::Bytes;
 
 use crate::video_encoder::VideoEncoderConfig;
 use crate::video_encoder::{EncodedFrame, H264VideoEncoder, NetworkQuality, VideoEncoderFactory};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// 视频轨道统计信息
 #[derive(Debug, Clone, Default)]
@@ -25,7 +29,7 @@ pub struct VideoTrackStats {
 /// H.264视频轨道 - 管理视频编码和WebRTC传输
 pub struct H264VideoTrack {
     /// WebRTC视频轨道
-    track: Arc<TrackLocalStaticSample>,
+    track: Arc<TrackLocalStaticRTP>,
     /// H.264编码器
     encoder: Arc<Mutex<H264VideoEncoder>>,
     /// 传输统计
@@ -34,6 +38,8 @@ pub struct H264VideoTrack {
     config: Arc<Mutex<VideoEncoderConfig>>,
     /// 帧发送队列
     frame_sender: Option<mpsc::UnboundedSender<EncodedFrame>>,
+    /// RTP Packetizer（保持全局递增序列号）
+    packetizer: Arc<Mutex<Box<dyn Packetizer + Send + Sync>>>,
 }
 
 impl H264VideoTrack {
@@ -47,7 +53,7 @@ impl H264VideoTrack {
         let config = encoder.get_config().clone();
         
         // 使用相同的H.264配置
-        let track = Arc::new(TrackLocalStaticSample::new(
+        let track = Arc::new(TrackLocalStaticRTP::new(
             RTCRtpCodecCapability {
                 mime_type: "video/H264".to_owned(),
                 clock_rate: 90000,
@@ -76,12 +82,32 @@ impl H264VideoTrack {
 
         log::info!("✅ H.264视频轨道创建成功 (质量: {:?})", network_quality);
 
+        // ---------- 初始化全局 Packetizer ----------
+        let mtu = 1200; // 典型 MTU
+        let payload_type = 102; // 需与 SDP 保持一致
+        let ssrc = rand::random::<u32>();
+        let payloader = Box::new(H264Payloader::default());
+        let sequencer = Box::new(new_random_sequencer());
+
+        let packetizer_raw = new_packetizer(
+            mtu,
+            payload_type,
+            ssrc,
+            payloader,
+            sequencer,
+            90_000, // clock rate
+        );
+        let packetizer: Box<dyn Packetizer + Send + Sync> = Box::new(packetizer_raw);
+
+        let packetizer = Arc::new(Mutex::new(packetizer));
+
         Ok(Self {
             track,
             encoder: Arc::new(Mutex::new(encoder)),
             config: Arc::new(Mutex::new(config)),
             frame_sender: None,
             stats: Arc::new(Mutex::new(VideoTrackStats::default())),
+            packetizer,
         })
     }
 
@@ -92,13 +118,12 @@ impl H264VideoTrack {
 
         let track = Arc::clone(&self.track);
         let stats = Arc::clone(&self.stats);
+        let packetizer_ref = Arc::clone(&self.packetizer);
         
         // 启动帧发送任务
         tokio::spawn(async move {
-            let mut sequence_number = 0u16;
-            
             while let Some(frame) = rx.recv().await {
-                match Self::send_h264_frame(&track, &frame, &mut sequence_number).await {
+                match Self::send_h264_frame(&track, &packetizer_ref, &frame).await {
                     Ok(bytes_sent) => {
                         let mut stats_guard = stats.lock().await;
                         stats_guard.frames_sent += 1;
@@ -136,9 +161,9 @@ impl H264VideoTrack {
 
     /// 发送H.264帧到WebRTC（使用TrackLocalStaticSample）
     async fn send_h264_frame(
-        track: &Arc<TrackLocalStaticSample>,
+        track: &Arc<TrackLocalStaticRTP>,
+        packetizer_arc: &Arc<Mutex<Box<dyn Packetizer + Send + Sync>>>,
         frame: &EncodedFrame,
-        _sequence_number: &mut u16,
     ) -> Result<usize> {
         // 记录所有帧发送尝试（包括空帧，用于调试）
         if frame.data.is_empty() {
@@ -152,9 +177,6 @@ impl H264VideoTrack {
             if frame.is_keyframe { "I" } else { "P" }
         );
         
-        // 计算帧持续时间 - 假设30fps，每帧33.33ms
-        let frame_duration = Duration::from_millis(33); // 30fps = 1000ms/30 ≈ 33.33ms
-        
         // 使用RTP时间戳而不是SystemTime
         // H.264使用90kHz时钟频率，所以每帧增加90000/30 = 3000
         static mut RTP_TIMESTAMP: u32 = 0;
@@ -163,29 +185,68 @@ impl H264VideoTrack {
             RTP_TIMESTAMP
         };
         
-        // 创建媒体样本 - 使用正确的时间戳格式
-        let sample = Sample {
-            data: frame.data.clone().into(),
-            timestamp: SystemTime::now(),
-            duration: frame_duration,
-            ..Default::default()
-        };
-        
-        // 发送到WebRTC轨道
-        match track.write_sample(&sample).await {
-            Ok(_) => {
-                log::debug!("✅ H.264帧发送成功: {}字节", frame.data.len());
-                Ok(frame.data.len())
+        // 使用持久化 Packetizer，保证全局递增序列号
+        let mut packetizer_guard = packetizer_arc.lock().await;
+
+        // 将 Annex-B 数据切分为单个 NALU，不含起始码
+        let nalus: Vec<&[u8]> = {
+            let mut nalus = Vec::new();
+            let mut start = 0usize;
+            let data = frame.data.as_slice();
+            let len = data.len();
+            // 简单查找 0x000001 / 0x00000001
+            let mut i = 0usize;
+            while i + 3 < len {
+                if data[i] == 0 && data[i+1] == 0 && ((data[i+2] == 1) || (data[i+2]==0 && i+4<len && data[i+3]==1)) {
+                    if i > start {
+                        nalus.push(&data[start..i]);
+                    }
+                    // 跳过起始码
+                    if data[i+2]==1 {
+                        start = i + 3;
+                        i += 3;
+                    } else {
+                        start = i + 4;
+                        i += 4;
+                    }
+                    continue;
+                }
+                i += 1;
             }
-            Err(e) => {
-                log::error!("❌ H.264帧发送失败: {}", e);
-                Err(e.into())
+            if start < len {
+                nalus.push(&data[start..]);
+            }
+            nalus
+        };
+
+        let mut pkts: Vec<RtpPacket> = Vec::new();
+        for (idx, nalu) in nalus.iter().enumerate() {
+            let is_last_nalu = idx == nalus.len() - 1;
+            let n_bytes = Bytes::copy_from_slice(nalu);
+            let samples_inc = if idx == 0 { 3000 } else { 0 };
+            let mut pks = packetizer_guard.packetize(&n_bytes, samples_inc)?;
+            if is_last_nalu {
+                if let Some(last) = pks.last_mut() {
+                    last.header.marker = true;
+                }
+            }
+            pkts.extend(pks);
+        }
+
+        let mut total_bytes = 0usize;
+        for mut pkt in pkts {
+            total_bytes += pkt.payload.len() + 12; // 12字节RTP头
+            // write_rtp 需要 &mut Packet
+            if let Err(e) = track.write_rtp(&mut pkt).await {
+                return Err(e.into());
             }
         }
+
+        Ok(total_bytes)
     }
 
     /// 获取WebRTC轨道
-    pub fn get_track(&self) -> Arc<TrackLocalStaticSample> {
+    pub fn get_track(&self) -> Arc<TrackLocalStaticRTP> {
         Arc::clone(&self.track)
     }
 
@@ -297,8 +358,7 @@ impl H264VideoTrack {
 
     /// 发送已编码帧到WebRTC轨道（异步）
     pub async fn send_encoded_frame(&self, frame: &crate::video_encoder::EncodedFrame) -> Result<()> {
-        let mut seq = 0u16;
-        let bytes_sent = Self::send_h264_frame(&self.track, frame, &mut seq).await?;
+        let bytes_sent = Self::send_h264_frame(&self.track, &self.packetizer, frame).await?;
 
         let mut stats = self.stats.lock().await;
         stats.frames_sent += 1;
