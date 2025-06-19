@@ -4,6 +4,7 @@ use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, RateControlM
 use openh264::OpenH264API;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use yuv::{rgba_to_yuv420, YuvPlanarImageMut, YuvRange, YuvStandardMatrix, YuvConversionMode, YuvChromaSubsampling};
 
 /// 视频编解码器类型
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,24 +69,6 @@ impl H264VideoEncoder {
         Ok(encoder)
     }
 
-    /// 更新编码器配置
-    pub async fn update_config(&mut self, new_config: VideoEncoderConfig) -> Result<()> {
-        if self.config == new_config {
-            return Ok(());
-        }
-
-        // 重新创建编码器，因为openh264 0.8.1没有update_config方法
-        let new_encoder = Self::create_encoder(&new_config)?;
-        let mut encoder = self.encoder.lock().await;
-        *encoder = new_encoder;
-
-        self.config = new_config;
-        self.frame_count = 0;
-        self.last_keyframe = 0;
-        self.next_force_keyframe = true;
-        Ok(())
-    }
-
     /// 编码RGBA帧数据为H.264格式
     pub async fn encode_frame(&mut self, rgba_data: &[u8], _timestamp: u64) -> Result<EncodedFrame> {
         self.frame_count += 1;
@@ -129,33 +112,82 @@ impl H264VideoEncoder {
         })
     }
 
-    /// 将RGBA数据转换为YUV I420格式
-    fn convert_rgba_to_yuv(&self, rgba_data: &[u8], width: usize, height: usize) -> Result<openh264::formats::YUVBuffer> {
-        let mut rgb_data = Vec::with_capacity(width * height * 3);
-        for chunk in rgba_data.chunks_exact(4) {
-            rgb_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2]]);
+    /// 编码RGBA帧数据为H.264格式 (同步版本，供阻塞线程调用，避免在已有异步执行器中再创建执行器)
+    pub fn encode_frame_sync(&mut self, rgba_data: &[u8], _timestamp: u64) -> Result<EncodedFrame> {
+        // 注意：此实现与 `encode_frame` 基本一致，但不依赖 async/await，直接使用 blocking_lock()
+        self.frame_count += 1;
+        let width = self.config.width;
+        let height = self.config.height;
+
+        let yuv_buffer = self.convert_rgba_to_yuv(rgba_data, width as usize, height as usize)?;
+
+        // 阻塞方式获取内部 OpenH264 encoder 的可变引用
+        let mut encoder = self.encoder.blocking_lock();
+
+        // 若等待关键帧，则在真正编码前请求 IDR
+        if self.next_force_keyframe {
+            let _ = encoder.force_intra_frame();
+            debug!("📣 已向 OpenH264 请求 IDR 帧 (#{}).", self.frame_count);
+            // 重置标志，避免连续多帧都被标记
+            self.next_force_keyframe = false;
         }
 
-        // 创建临时向量来存储YUV数据
-        let y_size = width * height;
-        let u_size = (width / 2) * (height / 2);
-        let v_size = u_size;
-        
-        let mut y_data = vec![0u8; y_size];
-        let mut u_data = vec![0u8; u_size];
-        let mut v_data = vec![0u8; v_size];
-        
-        rgb_to_i420(&rgb_data, width as u32, height as u32, &mut y_data, &mut u_data, &mut v_data);
-        
-        // 将Y、U、V数据合并为一个向量，按照I420格式
-        let mut yuv_data = Vec::with_capacity(y_size + u_size + v_size);
-        yuv_data.extend_from_slice(&y_data);
-        yuv_data.extend_from_slice(&u_data);
-        yuv_data.extend_from_slice(&v_data);
-        
-        // 使用from_vec创建YUVBuffer
-        let yuv = openh264::formats::YUVBuffer::from_vec(yuv_data, width, height);
-        
+        let encoded_slice = encoder.encode(&yuv_buffer)?;
+        let frame_data = encoded_slice.to_vec();
+        let is_keyframe = self.is_keyframe(&frame_data);
+
+        if is_keyframe {
+            log::info!("✅ 成功编码I帧 (关键帧): {}字节", frame_data.len());
+            self.last_keyframe = self.frame_count;
+        }
+
+        if frame_data.is_empty() {
+            warn!("⚠️ H.264编码器产生了空帧数据 - 帧#{}", self.frame_count);
+        }
+
+        self.validate_annex_b(&frame_data);
+
+        // 若距上次关键帧超过阈值，则触发下一帧关键帧
+        if self.frame_count - self.last_keyframe > 30 {
+            self.next_force_keyframe = true;
+        }
+
+        Ok(EncodedFrame {
+            data: frame_data,
+            is_keyframe,
+        })
+    }
+
+    /// 将RGBA数据转换为YUV I420格式（SIMD加速，基于 yuvutils-rs）
+    fn convert_rgba_to_yuv(&self, rgba_data: &[u8], width: usize, height: usize) -> Result<openh264::formats::YUVBuffer> {
+        // 使用 yuvutils_rs 分配并转换
+        let mut planar = YuvPlanarImageMut::<u8>::alloc(
+            width as u32,
+            height as u32,
+            YuvChromaSubsampling::Yuv420,
+        );
+
+        // 执行 SIMD 转换（RGBA -> YUV420P）
+        rgba_to_yuv420(
+            &mut planar,
+            rgba_data,
+            (width * 4) as u32,
+            YuvRange::Limited,
+            YuvStandardMatrix::Bt709,
+            YuvConversionMode::Balanced,
+        ).map_err(|e| anyhow::anyhow!("rgba_to_yuv420 failed: {e}"))?;
+
+        // 通过 borrow() 获取只读切片，兼容 yuv crate 的 BufferStoreMut API
+        let y_plane = planar.y_plane.borrow();
+        let u_plane = planar.u_plane.borrow();
+        let v_plane = planar.v_plane.borrow();
+
+        let mut yuv_vec = Vec::with_capacity(y_plane.len() + u_plane.len() + v_plane.len());
+        yuv_vec.extend_from_slice(y_plane);
+        yuv_vec.extend_from_slice(u_plane);
+        yuv_vec.extend_from_slice(v_plane);
+
+        let yuv = openh264::formats::YUVBuffer::from_vec(yuv_vec, width, height);
         Ok(yuv)
     }
 
@@ -308,45 +340,4 @@ pub enum NetworkQuality {
     Excellent, // 优秀 (>10Mbps, RTT<50ms)
     Good,      // 良好 (1-10Mbps, RTT<200ms)
     Poor,      // 较差 (<1Mbps, RTT>200ms)
-}
-
-/// 将RGB888 (R,G,B连续) 数据转换为 I420(YUV420 Planar)
-pub fn rgb_to_i420(rgb: &[u8], width: u32, height: u32, y_out: &mut [u8], u_out: &mut [u8], v_out: &mut [u8]) {
-    let u_width = (width / 2) as usize;
-    let u_height = (height / 2) as usize;
-    let u_size = u_width * u_height;
-    let v_size = u_size;
-    let y_size = (width * height) as usize;
-
-    if y_out.len() < y_size || u_out.len() < u_size || v_out.len() < v_size {
-        // Not enough space
-        return;
-    }
-
-    let mut y_idx = 0;
-    let mut u_idx = 0;
-    let mut v_idx = 0;
-
-    for j in 0..height {
-        for i in 0..width {
-            let r = rgb[((j * width + i) * 3) as usize] as i32;
-            let g = rgb[((j * width + i) * 3 + 1) as usize] as i32;
-            let b = rgb[((j * width + i) * 3 + 2) as usize] as i32;
-
-            let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-            y_out[y_idx] = y.clamp(16, 235) as u8;
-            y_idx += 1;
-
-            if j % 2 == 0 && i % 2 == 0 {
-                let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-
-                u_out[u_idx] = u.clamp(16, 240) as u8;
-                v_out[v_idx] = v.clamp(16, 240) as u8;
-
-                u_idx += 1;
-                v_idx += 1;
-            }
-        }
-    }
 }

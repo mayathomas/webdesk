@@ -24,6 +24,8 @@ pub struct VideoStreamManager {
     state: Arc<Mutex<StreamState>>,
     /// 取消令牌，用于优雅停止内部任务
     cancel_token: CancellationToken,
+    /// 上一次自适应质量的时间
+    last_quality_change: Arc<Mutex<Instant>>,
 }
 
 /// 流配置
@@ -109,6 +111,7 @@ impl VideoStreamManager {
             control_tx: None,
             state: Arc::new(Mutex::new(StreamState::Stopped)),
             cancel_token: CancellationToken::new(),
+            last_quality_change: Arc::new(Mutex::new(Instant::now())),
         })
     }
 
@@ -269,14 +272,15 @@ impl VideoStreamManager {
 
                 let video_track_mutex = Arc::clone(&video_track);
                 let video_stats_clone = Arc::clone(&video_stats);
-                let frame_data = first_frame.data.clone();
+                // 直接移动 Vec，避免多余 clone
+                let frame_data = first_frame.data;
 
                 let encode_start = Instant::now();
                 match tokio::task::spawn_blocking(move || {
                     let mut guard = video_track_mutex.blocking_lock();
                     guard.encode_rgba_sync(&frame_data)
                 }).await {
-                    Ok(Ok(encoded_frame)) => {
+                    Ok(Ok(Some(encoded_frame))) => {
                         let encode_time = encode_start.elapsed();
                         if let Err(e) = video_track.lock().await.send_encoded_frame(&encoded_frame).await {
                             error!("❌ 首帧发送失败: {}", e);
@@ -289,6 +293,10 @@ impl VideoStreamManager {
                                 + (encode_time.as_millis() as f64 * 0.1);
                             debug!("✅ 首帧编码并发送完成，用时: {:.1}ms", encode_time.as_millis());
                         }
+                    }
+                    Ok(Ok(None)) => {
+                        // 预热丢帧
+                        video_stats_clone.lock().await.frames_dropped += 1;
                     }
                     Ok(Err(e)) => {
                         error!("❌ 首帧编码失败: {}", e);
@@ -323,7 +331,8 @@ impl VideoStreamManager {
                                 // 编码放到阻塞线程池，避免阻塞整个async任务
                                 let video_track_mutex = Arc::clone(&video_track);
                                 let video_stats_clone = Arc::clone(&video_stats);
-                                let frame_data = video_frame.data.clone();
+                                // 移动 Vec 所有权，避免 clone
+                                let frame_data = video_frame.data;
 
                                 // ① 在阻塞线程中执行同步编码
                                 let encode_start = Instant::now();
@@ -332,7 +341,7 @@ impl VideoStreamManager {
                                         .blocking_lock();
                                     guard.encode_rgba_sync(&frame_data)
                                 }).await {
-                                    Ok(Ok(encoded_frame)) => {
+                                    Ok(Ok(Some(encoded_frame))) => {
                                         let encode_time = encode_start.elapsed();
 
                                         // ② 回到 async 线程发送
@@ -348,6 +357,10 @@ impl VideoStreamManager {
                                                     + (encode_time.as_millis() as f64 * 0.1);
                                             debug!("✅ 编码并发送完成，用时: {:.1}ms", encode_time.as_millis());
                                         }
+                                    }
+                                    Ok(Ok(None)) => {
+                                        // 预热阶段丢弃帧，计入 dropped
+                                        video_stats_clone.lock().await.frames_dropped += 1;
                                     }
                                     Ok(Err(e)) => {
                                         error!("❌ 编码帧失败: {}", e);
@@ -387,6 +400,7 @@ impl VideoStreamManager {
         let video_track = Arc::clone(&self.video_track);
         let adapt_interval = Duration::from_secs_f64(self.config.quality_adapt_interval);
         let cancel_token = self.cancel_token.clone();
+        let last_change_ref = Arc::clone(&self.last_quality_change);
         
         let cancel_adapt = cancel_token.clone();
         tokio::spawn(async move {
@@ -399,6 +413,14 @@ impl VideoStreamManager {
                         break;
                     }
                     _ = interval.tick() => {}
+                }
+                
+                // 冷却：距离上次调整不足 15 秒则跳过
+                {
+                    let ts = last_change_ref.lock().await;
+                    if ts.elapsed() < Duration::from_secs(15) {
+                        continue;
+                    }
                 }
                 
                 // 获取网络统计信息
@@ -428,6 +450,9 @@ impl VideoStreamManager {
                         debug!("🛑 质量自适应任务结束：控制通道已关闭");
                         break;
                     }
+
+                    // 更新最后调整时间
+                    *last_change_ref.lock().await = Instant::now();
                 }
             }
         });

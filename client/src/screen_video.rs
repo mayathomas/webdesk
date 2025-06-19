@@ -324,15 +324,12 @@ mod screen_capture_windows {
                     return Err(anyhow!("GetDIBits失败"));
                 }
 
-                // Windows GDI返回的是BGRA格式，需要转换为RGBA
-                let mut rgba_data = Vec::with_capacity(pixel_data.len());
-                for chunk in pixel_data.chunks(4) {
-                    if chunk.len() == 4 {
-                        // BGRA -> RGBA
-                        rgba_data.push(chunk[2]); // R
-                        rgba_data.push(chunk[1]); // G  
-                        rgba_data.push(chunk[0]); // B
-                        rgba_data.push(chunk[3]); // A
+                // Windows GDI返回的是BGRA，需要原地交换 B 与 R，避免分配新 Vec
+                for px in pixel_data.chunks_mut(4) {
+                    if px.len() == 4 {
+                        let b = px[0];
+                        px[0] = px[2]; // R
+                        px[2] = b;     // B
                     }
                 }
 
@@ -340,10 +337,10 @@ mod screen_capture_windows {
                     "📷 成功捕获{}x{}屏幕帧 ({} bytes)",
                     self.screen_width,
                     self.screen_height,
-                    rgba_data.len()
+                    pixel_data.len()
                 );
 
-                Ok(RawVideoFrame { data: rgba_data })
+                Ok(RawVideoFrame { data: pixel_data })
             }
         }
     }

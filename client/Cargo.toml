@@ -40,6 +40,7 @@ async-trait = "0.1"
 webrtc = {version = "0.13"}
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.0"
+yuv = "0.8"
 
 # Tauri 2.0依赖
 tauri = { version = "2.0", features = ["tray-icon"] }
@@ -53,7 +54,6 @@ env_logger = { workspace = true }
 # OpenH264 视频编码
 openh264.workspace = true
 openh264-sys2.workspace = true
-yuv.workspace = true
 quinn.workspace = true
 flume = "0.11"
 

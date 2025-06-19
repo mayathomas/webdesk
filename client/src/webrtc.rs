@@ -215,13 +215,9 @@ impl WebRTCClient {
                             } else {
                                 log::info!("🌟 延迟3s后切到高画质 (1920x1080 30fps)");
 
-                                // 在 1 秒时间窗内多次请求关键帧，加速浏览器解码
-                                use std::time::Duration;
-                                for _ in 0..5 {
-                                    if let Err(e) = manager.force_keyframe().await {
-                                        log::warn!("⚠️ 关键帧请求失败: {}", e);
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                // 单次请求关键帧即可，避免连续 I 帧造成黑屏闪烁
+                                if let Err(e) = manager.force_keyframe().await {
+                                    log::warn!("⚠️ 关键帧请求失败: {}", e);
                                 }
                             }
                             

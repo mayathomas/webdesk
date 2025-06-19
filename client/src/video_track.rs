@@ -13,6 +13,8 @@ use bytes::Bytes;
 use crate::video_encoder::VideoEncoderConfig;
 use crate::video_encoder::{EncodedFrame, H264VideoEncoder, NetworkQuality, VideoEncoderFactory};
 use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// 视频轨道统计信息
 #[derive(Debug, Clone, Default)]
@@ -31,7 +33,8 @@ pub struct H264VideoTrack {
     /// WebRTC视频轨道
     track: Arc<TrackLocalStaticRTP>,
     /// H.264编码器
-    encoder: Arc<Mutex<H264VideoEncoder>>,
+    encoder: Arc<Mutex<H264VideoEncoder>>,            // 当前使用的编码器
+    pending_encoder: Arc<Mutex<Option<H264VideoEncoder>>>, // 正在预热的新编码器
     /// 传输统计
     stats: Arc<Mutex<VideoTrackStats>>,
     /// 配置信息
@@ -43,6 +46,10 @@ pub struct H264VideoTrack {
     /// 缓存最近的 SPS / PPS NALU（不含起始码）
     last_sps: Arc<Mutex<Option<Vec<u8>>>>,
     last_pps: Arc<Mutex<Option<Vec<u8>>>>,
+    /// 是否已经发送过首帧黑屏（全局一次）
+    bootstrap_sent: Arc<AtomicBool>,
+    /// 上次真正应用配置的时间，用于 Cool-down
+    last_cfg_change: Arc<Mutex<Instant>>,
 }
 
 impl H264VideoTrack {
@@ -107,12 +114,15 @@ impl H264VideoTrack {
         Ok(Self {
             track,
             encoder: Arc::new(Mutex::new(encoder)),
+            pending_encoder: Arc::new(Mutex::new(None)),
             config: Arc::new(Mutex::new(config)),
             frame_sender: None,
             stats: Arc::new(Mutex::new(VideoTrackStats::default())),
             packetizer,
             last_sps: Arc::new(Mutex::new(None)),
             last_pps: Arc::new(Mutex::new(None)),
+            bootstrap_sent: Arc::new(AtomicBool::new(false)),
+            last_cfg_change: Arc::new(Mutex::new(Instant::now())),
         })
     }
 
@@ -170,15 +180,31 @@ impl H264VideoTrack {
         // --------------------------------------------------------------------
         if let Some(bootstrap_tx) = self.frame_sender.as_ref().cloned() {
             let encoder_ref = Arc::clone(&self.encoder);
+            let stats_ref = Arc::clone(&self.stats);
+            let flag = Arc::clone(&self.bootstrap_sent);
+
             tokio::spawn(async move {
                 use std::time::Duration;
-                // 等待最多 500ms，看捕获链路是否已经产出帧。
                 tokio::time::sleep(Duration::from_millis(500)).await;
 
-                // 若发送方已经有帧，则不再插入黑帧。
-                // 这里简单检查通道容量；mpsc::UnboundedSender 无法直接获取，
-                // 因此折中做法：尝试非阻塞发送，若失败说明接收端已关闭或已有帧。
-                // 若成功则继续正常流程。
+                // 若已经发过黑帧，则直接退出
+                if flag.load(Ordering::SeqCst) {
+                    return;
+                }
+
+                // 再检查一次真实帧数量，确保捕获链路确实还未送帧
+                let sent_frames = {
+                    let st = stats_ref.lock().await;
+                    st.frames_sent
+                };
+                if sent_frames > 0 {
+                    return; // 已有画面，不插黑帧
+                }
+
+                // 尝试原子置位，防止并发重复
+                if flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                    return;
+                }
 
                 // 构造黑色 RGBA
                 let cfg = {
@@ -214,12 +240,13 @@ impl H264VideoTrack {
         {
             let encoder = Arc::clone(&self.encoder);
             tokio::spawn(async move {
-                for _ in 0..10 {
+                for _i in 0..2 {
                     {
                         let mut enc = encoder.lock().await;
                         enc.request_keyframe();
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    // 两次足够触发 IDR；减少过量关键帧导致的闪黑
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             });
         }
@@ -324,6 +351,9 @@ impl H264VideoTrack {
         pps_cache: &Arc<Mutex<Option<Vec<u8>>>>,
         frame: &EncodedFrame,
     ) -> Result<usize> {
+        if frame.is_keyframe {
+            log::info!("→ RTP 关键帧：{} 字节", frame.data.len());
+        }
         // 记录所有帧发送尝试（包括空帧，用于调试）
         if frame.data.is_empty() {
             log::debug!("📤 尝试发送空的H.264帧 - 跳过");
@@ -394,14 +424,39 @@ impl H264VideoTrack {
             nalus
         };
 
-        let mut pkts: Vec<RtpPacket> = Vec::new();
-        // 如果是关键帧，先发送一个 STAP-A 包含缓存 SPS/PPS
+        // -----------------------------------------
+        // 如果是关键帧：
+        // 1. 先扫描 nalus，提取本帧内的 SPS / PPS，更新缓存；
+        // 2. 再使用 "最新" SPS / PPS 组装 STAP-A 并在发送
+        //    实际帧数据前写入，避免编码器切换后发送了旧参数。
+        // -----------------------------------------
+
+        let mut cur_sps: Option<Vec<u8>> = None;
+        let mut cur_pps: Option<Vec<u8>> = None;
+
         if frame.is_keyframe {
-            let sps_opt = { sps_cache.lock().await.clone() };
-            let pps_opt = { pps_cache.lock().await.clone() };
-            if let (Some(sps), Some(pps)) = (sps_opt, pps_opt) {
+            for nalu in &nalus {
+                if nalu.is_empty() { continue; }
+                let nal_type = nalu[0] & 0x1F;
+                match nal_type {
+                    7 => cur_sps = Some(nalu.to_vec()),
+                    8 => cur_pps = Some(nalu.to_vec()),
+                    _ => {}
+                }
+            }
+
+            // 更新全局缓存（用于后续非关键帧）
+            if let Some(ref sps) = cur_sps {
+                *sps_cache.lock().await = Some(sps.clone());
+            }
+            if let Some(ref pps) = cur_pps {
+                *pps_cache.lock().await = Some(pps.clone());
+            }
+
+            // 组装并发送 STAP-A（确保 SPS/PPS 先于 IDR 到达浏览器）
+            if let (Some(sps), Some(pps)) = (cur_sps.clone(), cur_pps.clone()) {
                 let mut stap = Vec::with_capacity(1 + 2 + sps.len() + 2 + pps.len());
-                stap.push(0x78); // F=0, NRI=3(11), Type=24 => 0b01111000 = 0x78
+                stap.push(0x78); // F=0, NRI=3(11), Type=24
                 stap.extend_from_slice(&(sps.len() as u16).to_be_bytes());
                 stap.extend_from_slice(&sps);
                 stap.extend_from_slice(&(pps.len() as u16).to_be_bytes());
@@ -416,6 +471,7 @@ impl H264VideoTrack {
             }
         }
 
+        let mut pkts: Vec<RtpPacket> = Vec::new();
         for (idx, nalu) in nalus.iter().enumerate() {
             let is_last_nalu = idx == nalus.len() - 1;
             let n_bytes = Bytes::copy_from_slice(nalu);
@@ -427,19 +483,6 @@ impl H264VideoTrack {
                 }
             }
             pkts.extend(pks);
-
-            // 缓存最近 SPS / PPS
-            if !nalu.is_empty() {
-                let nal_type = nalu[0] & 0x1F;
-                // 7 SPS， 8 PPS
-                if nal_type == 7 {
-                    let mut sps_lock = sps_cache.lock().await;
-                    *sps_lock = Some(nalu.to_vec());
-                } else if nal_type == 8 {
-                    let mut pps_lock = pps_cache.lock().await;
-                    *pps_lock = Some(nalu.to_vec());
-                }
-            }
         }
 
         let mut total_bytes = 0usize;
@@ -461,11 +504,20 @@ impl H264VideoTrack {
 
     /// 更新编码器配置
     pub async fn update_config(&mut self, new_config: VideoEncoderConfig) -> Result<()> {
-        let mut encoder = self.encoder.lock().await;
-        encoder.update_config(new_config.clone()).await?;
-        let mut config = self.config.lock().await;
-        *config = new_config;
-        log::info!("🔧 H.264视频轨道配置已更新");
+        {
+            let cfg = self.config.lock().await;
+            if *cfg == new_config {
+                return Ok(()); // 无变化
+            }
+        }
+
+        // 构造新编码器(同步)，并放入 pending，等待首个关键帧后自动切换
+        let mut new_enc = H264VideoEncoder::new(new_config.clone())?;
+        new_enc.request_keyframe(); // 确保第一帧就是 IDR
+
+        *self.pending_encoder.lock().await = Some(new_enc);
+        *self.config.lock().await = new_config;
+        log::info!("🔧 预热新编码器，等待关键帧无缝切换");
         Ok(())
     }
 
@@ -485,6 +537,20 @@ impl H264VideoTrack {
     pub async fn adapt_quality(&mut self, network_stats: &NetworkStats) -> Result<()> {
         let current_quality = self.determine_quality(network_stats);
         
+        // 辅助比较函数：允许±15% 码率、±20% fps 变化内忽略
+        fn approx_equal(a: u32, b: u32, percent: u32) -> bool {
+            let (max, min) = if a > b { (a, b) } else { (b, a) };
+            (max - min) * 100 <= max * percent
+        }
+
+        // 冷却 10s，防抖动
+        {
+            let ts = self.last_cfg_change.lock().await;
+            if ts.elapsed() < Duration::from_secs(10) {
+                return Ok(());
+            }
+        }
+
         match current_quality {
             NetworkQuality::Poor => {
                 let (w, h) = (1920, 1080);  
@@ -497,8 +563,11 @@ impl H264VideoTrack {
                     codec: cfg.codec.clone(),
                     quality: 60,
                 };
-                if new_config != cfg {
+                if new_config.quality != cfg.quality ||
+                   !approx_equal(new_config.bitrate, cfg.bitrate, 15) ||
+                   !approx_equal(new_config.fps as u32, cfg.fps as u32, 20) {
                     self.update_config(new_config).await?;
+                    *self.last_cfg_change.lock().await = Instant::now();
                 }
             }
             NetworkQuality::Good => {
@@ -512,8 +581,11 @@ impl H264VideoTrack {
                     codec: cfg.codec.clone(),
                     quality: 75,
                 };
-                if new_config != cfg {
+                if new_config.quality != cfg.quality ||
+                   !approx_equal(new_config.bitrate, cfg.bitrate, 15) ||
+                   !approx_equal(new_config.fps as u32, cfg.fps as u32, 20) {
                     self.update_config(new_config).await?;
+                    *self.last_cfg_change.lock().await = Instant::now();
                 }
             }
             NetworkQuality::Excellent => {
@@ -527,8 +599,11 @@ impl H264VideoTrack {
                     codec: cfg.codec.clone(),
                     quality: 90,
                 };
-                if new_config != cfg {
+                if new_config.quality != cfg.quality ||
+                   !approx_equal(new_config.bitrate, cfg.bitrate, 15) ||
+                   !approx_equal(new_config.fps as u32, cfg.fps as u32, 20) {
                     self.update_config(new_config).await?;
+                    *self.last_cfg_change.lock().await = Instant::now();
                 }
             }
         }
@@ -553,14 +628,41 @@ impl H264VideoTrack {
     }
 
     /// 同步编码RGBA数据，不执行发送（可在spawn_blocking中调用）
-    pub fn encode_rgba_sync(&mut self, rgba_data: &[u8]) -> Result<crate::video_encoder::EncodedFrame> {
+    pub fn encode_rgba_sync(&mut self, rgba_data: &[u8]) -> Result<Option<crate::video_encoder::EncodedFrame>> {
         let start_time = std::time::Instant::now();
 
-        // 阻塞调用内部异步编码器
-        let encoded = futures::executor::block_on(async {
-            let mut enc = self.encoder.lock().await;
-            enc.encode_frame(rgba_data, 0).await
-        })?;
+        let use_pending = {
+            let pen_opt = self.pending_encoder.blocking_lock();
+            pen_opt.is_some()
+        };
+
+        let encoded_opt = if use_pending {
+            // 用新的编码器尝试编码（同步）
+            let mut pen_guard = self.pending_encoder.blocking_lock();
+            let pen = pen_guard.as_mut().unwrap();
+            let enc = pen.encode_frame_sync(rgba_data, 0)?;
+            // 若尚未关键帧，则丢弃（返回None）
+            if !enc.is_keyframe {
+                log::debug!("⏳ 预热阶段丢弃非关键帧 {} bytes", enc.data.len());
+                return Ok(None);
+            }
+            enc
+        } else {
+            let mut enc = self.encoder.blocking_lock();
+            enc.encode_frame_sync(rgba_data, 0)?
+        };
+
+        let encoded = encoded_opt;
+
+        // 如果成功且是 keyframe，并且用的是 pending，则完成切换
+        if use_pending && encoded.is_keyframe {
+            let mut pen_guard = self.pending_encoder.blocking_lock();
+            if let Some(new_enc) = pen_guard.take() {
+                let mut cur_guard = self.encoder.blocking_lock();
+                *cur_guard = new_enc;
+                log::info!("🎉 新编码器关键帧已发送，完成无缝切换");
+            }
+        }
 
         log::debug!(
             "🎬 [sync] 编码完成: {}字节, 用时{:.1}ms",
@@ -568,7 +670,7 @@ impl H264VideoTrack {
             start_time.elapsed().as_millis()
         );
 
-        Ok(encoded)
+        Ok(Some(encoded))
     }
 
     /// 发送已编码帧到WebRTC轨道（异步）
