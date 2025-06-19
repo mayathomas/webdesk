@@ -263,6 +263,44 @@ impl VideoStreamManager {
                 }
             };
 
+            // 首帧优化：尝试立即同步捕获一帧并发送，避免黑屏
+            if let Ok(first_frame) = screen_capture.lock().await.capture_single_frame().await {
+                debug!("🚀 首帧优化：已同步捕获一帧 {} bytes，立即编码发送", first_frame.data.len());
+
+                let video_track_mutex = Arc::clone(&video_track);
+                let video_stats_clone = Arc::clone(&video_stats);
+                let frame_data = first_frame.data.clone();
+
+                let encode_start = Instant::now();
+                match tokio::task::spawn_blocking(move || {
+                    let mut guard = video_track_mutex.blocking_lock();
+                    guard.encode_rgba_sync(&frame_data)
+                }).await {
+                    Ok(Ok(encoded_frame)) => {
+                        let encode_time = encode_start.elapsed();
+                        if let Err(e) = video_track.lock().await.send_encoded_frame(&encoded_frame).await {
+                            error!("❌ 首帧发送失败: {}", e);
+                            video_stats_clone.lock().await.transmission_errors += 1;
+                        } else {
+                            let mut stats_guard = video_stats_clone.lock().await;
+                            stats_guard.frames_captured += 1;
+                            stats_guard.frames_encoded += 1;
+                            stats_guard.average_encoding_latency_ms = (stats_guard.average_encoding_latency_ms * 0.9)
+                                + (encode_time.as_millis() as f64 * 0.1);
+                            debug!("✅ 首帧编码并发送完成，用时: {:.1}ms", encode_time.as_millis());
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("❌ 首帧编码失败: {}", e);
+                        video_stats_clone.lock().await.encoding_errors += 1;
+                    }
+                    Err(e) => {
+                        error!("❌ 首帧编码任务执行失败: {}", e);
+                        video_stats_clone.lock().await.encoding_errors += 1;
+                    }
+                }
+            }
+
             loop {
                 tokio::select! {
                     _ = cancel_ctrl.cancelled() => {
@@ -364,26 +402,32 @@ impl VideoStreamManager {
                 }
                 
                 // 获取网络统计信息
-                let network_stats = {
+                let maybe_stats = {
                     let track = video_track.lock().await;
                     let track_stats = track.get_stats().await;
-                    
-                    // 基于视频轨道统计估算网络状况
-                    NetworkStats {
-                        available_bandwidth_bps: (track_stats.average_bitrate_kbps * 1000.0) as u64,
-                        round_trip_time_ms: 50.0, // TODO: 从WebRTC获取真实的RTT
-                        packet_loss_ratio: if track_stats.transmission_errors > 0 {
-                            track_stats.transmission_errors as f64 / track_stats.frames_sent.max(1) as f64
-                        } else {
-                            0.0
-                        },
+
+                    if track_stats.frames_sent == 0 {
+                        // 首帧尚未发送，跳过自适应，避免频繁重建编码器导致延迟
+                        None
+                    } else {
+                        Some(NetworkStats {
+                            available_bandwidth_bps: (track_stats.average_bitrate_kbps * 1000.0) as u64,
+                            round_trip_time_ms: 50.0, // TODO: 从WebRTC获取真实的RTT
+                            packet_loss_ratio: if track_stats.transmission_errors > 0 {
+                                track_stats.transmission_errors as f64 / track_stats.frames_sent as f64
+                            } else {
+                                0.0
+                            },
+                        })
                     }
                 };
-                
-                // 发送质量自适应命令
-                if let Err(_) = control_tx.send(StreamCommand::AdaptQuality(network_stats)) {
-                    debug!("🛑 质量自适应任务结束：控制通道已关闭");
-                    break;
+
+                if let Some(network_stats) = maybe_stats {
+                    // 发送质量自适应命令
+                    if control_tx.send(StreamCommand::AdaptQuality(network_stats)).is_err() {
+                        debug!("🛑 质量自适应任务结束：控制通道已关闭");
+                        break;
+                    }
                 }
             }
         });
@@ -528,7 +572,7 @@ impl StreamConfig {
     pub fn low_latency() -> Self {
         StreamConfigBuilder::new()
             .video_quality(NetworkQuality::Poor)
-            .resolution(1280, 720)
+            .resolution(1920, 1080)
             .fps(15.0)
             .bitrate(500_000)
             .build()

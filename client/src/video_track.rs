@@ -40,6 +40,9 @@ pub struct H264VideoTrack {
     frame_sender: Option<mpsc::UnboundedSender<EncodedFrame>>,
     /// RTP Packetizer（保持全局递增序列号）
     packetizer: Arc<Mutex<Box<dyn Packetizer + Send + Sync>>>,
+    /// 缓存最近的 SPS / PPS NALU（不含起始码）
+    last_sps: Arc<Mutex<Option<Vec<u8>>>>,
+    last_pps: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl H264VideoTrack {
@@ -108,6 +111,8 @@ impl H264VideoTrack {
             frame_sender: None,
             stats: Arc::new(Mutex::new(VideoTrackStats::default())),
             packetizer,
+            last_sps: Arc::new(Mutex::new(None)),
+            last_pps: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -119,11 +124,13 @@ impl H264VideoTrack {
         let track = Arc::clone(&self.track);
         let stats = Arc::clone(&self.stats);
         let packetizer_ref = Arc::clone(&self.packetizer);
+        let sps_ref = Arc::clone(&self.last_sps);
+        let pps_ref = Arc::clone(&self.last_pps);
         
         // 启动帧发送任务
         tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
-                match Self::send_h264_frame(&track, &packetizer_ref, &frame).await {
+                match Self::send_h264_frame(&track, &packetizer_ref, &sps_ref, &pps_ref, &frame).await {
                     Ok(bytes_sent) => {
                         let mut stats_guard = stats.lock().await;
                         stats_guard.frames_sent += 1;
@@ -155,6 +162,156 @@ impl H264VideoTrack {
             }
         });
 
+        // --------------------------------------------------------------------
+        // 首帧保障：如果捕获链路过慢，浏览器在若干秒内得不到任何RTP
+        // 包就会判定连接失败。这里额外启动一个后台任务，主动构造一帧
+        // 全黑 RGBA 图像并编码为 IDR，再通过同一个 frame_sender 发送。
+        // 只尝试一次；若发送成功即可立即"开画"，极大缩短首帧等待。
+        // --------------------------------------------------------------------
+        if let Some(bootstrap_tx) = self.frame_sender.as_ref().cloned() {
+            let encoder_ref = Arc::clone(&self.encoder);
+            tokio::spawn(async move {
+                use std::time::Duration;
+                // 等待最多 500ms，看捕获链路是否已经产出帧。
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // 若发送方已经有帧，则不再插入黑帧。
+                // 这里简单检查通道容量；mpsc::UnboundedSender 无法直接获取，
+                // 因此折中做法：尝试非阻塞发送，若失败说明接收端已关闭或已有帧。
+                // 若成功则继续正常流程。
+
+                // 构造黑色 RGBA
+                let cfg = {
+                    let enc = encoder_ref.lock().await;
+                    enc.get_config().clone()
+                };
+                let blank_rgba = vec![0u8; (cfg.width * cfg.height * 4) as usize];
+
+                // 编码黑帧并标记为关键帧
+                let maybe_frame = {
+                    let mut enc = encoder_ref.lock().await;
+                    enc.request_keyframe();
+                    enc.encode_frame(&blank_rgba, 0).await
+                };
+
+                match maybe_frame {
+                    Ok(frame) => {
+                        if bootstrap_tx.send(frame).is_ok() {
+                            log::info!("🚀 已主动发送首帧黑屏IDR以加速开画");
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️ 主动黑帧编码失败: {}", e);
+                    }
+                }
+            });
+        }
+
+        // ----------------------------------------------
+        // 关键帧预热：连接建立后的 1 秒内，连续请求 3 次 IDR，
+        // 以确保浏览器端尽早获得可解码的关键帧。
+        // ----------------------------------------------
+        {
+            let encoder = Arc::clone(&self.encoder);
+            tokio::spawn(async move {
+                for _ in 0..10 {
+                    {
+                        let mut enc = encoder.lock().await;
+                        enc.request_keyframe();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+        }
+
+        // ----------------------------------------------
+        // 周期性检查：若 2 秒内未发送关键帧，则请求关键帧。
+        // 解决再次连接后浏览器等待 IDR 的问题。
+        // ----------------------------------------------
+        {
+            let encoder = Arc::clone(&self.encoder);
+            let stats_ref = Arc::clone(&self.stats);
+            tokio::spawn(async move {
+                use std::time::Duration;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    let need_kf = {
+                        let stats = stats_ref.lock().await;
+                        match stats.last_keyframe_time {
+                            Some(ts) => ts.elapsed() > Duration::from_secs(3),
+                            None => true,
+                        }
+                    };
+                    if need_kf {
+                        let mut enc = encoder.lock().await;
+                        // 连续申请两次，间隔 50ms，提高命中率
+                        enc.request_keyframe();
+                        drop(enc);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let mut enc2 = encoder.lock().await;
+                        enc2.request_keyframe();
+                    }
+                }
+            });
+        }
+
+        // --------------------------------------------------------------------
+        // 继续保活：如果 2 秒内依然没有发送足够帧 (frames_sent < 5)，
+        // 每隔 33ms 发送一帧黑屏直到捕获链路接管或达到 30 帧上限。
+        // --------------------------------------------------------------------
+        {
+            let stats_ref = Arc::clone(&self.stats);
+            let encoder_ref = Arc::clone(&self.encoder);
+            let sender_opt = self.frame_sender.as_ref().cloned();
+
+            if let Some(fallback_tx) = sender_opt {
+                tokio::spawn(async move {
+                    use std::time::Duration;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    let mut sent = {
+                        let st = stats_ref.lock().await;
+                        st.frames_sent
+                    };
+
+                    if sent >= 5 {
+                        return; // 捕获已正常工作，不需要填充
+                    }
+
+                    log::warn!("⚠️ 捕获链路仍未产出帧，开始发送保活黑帧...");
+
+                    for _ in 0..30 { // 最多 1 秒
+                        sent = {
+                            let st = stats_ref.lock().await;
+                            st.frames_sent
+                        };
+                        if sent >= 5 {
+                            log::info!("✅ 捕获链路恢复，停止黑帧保活");
+                            break;
+                        }
+
+                        // 构造黑色 RGBA
+                        let cfg = {
+                            let enc = encoder_ref.lock().await;
+                            enc.get_config().clone()
+                        };
+                        let blank_data = vec![0u8; (cfg.width * cfg.height * 4) as usize];
+
+                        // 编码并发送
+                        if let Ok(frame) = {
+                            let mut enc = encoder_ref.lock().await;
+                            enc.request_keyframe();
+                            enc.encode_frame(&blank_data, 0).await
+                        } {
+                            let _ = fallback_tx.send(frame);
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(33)).await;
+                    }
+                });
+            }
+        }
+
         log::info!("✅ H.264视频流传输已启动");
         Ok(())
     }
@@ -163,6 +320,8 @@ impl H264VideoTrack {
     async fn send_h264_frame(
         track: &Arc<TrackLocalStaticRTP>,
         packetizer_arc: &Arc<Mutex<Box<dyn Packetizer + Send + Sync>>>,
+        sps_cache: &Arc<Mutex<Option<Vec<u8>>>>,
+        pps_cache: &Arc<Mutex<Option<Vec<u8>>>>,
         frame: &EncodedFrame,
     ) -> Result<usize> {
         // 记录所有帧发送尝试（包括空帧，用于调试）
@@ -187,6 +346,22 @@ impl H264VideoTrack {
         
         // 使用持久化 Packetizer，保证全局递增序列号
         let mut packetizer_guard = packetizer_arc.lock().await;
+
+        // ----------------- RTP 时间戳增量 -----------------
+        use std::time::Instant;
+        static mut LAST_INSTANT: Option<Instant> = None;
+        let now_i = Instant::now();
+        let samples_inc_frame: u32 = unsafe {
+            match LAST_INSTANT {
+                Some(prev) => {
+                    let delta_us = now_i.duration_since(prev).as_micros() as u32;
+                    // 90 kHz * delta(ms)
+                    ((90 * delta_us) / 1000).max(1)
+                }
+                None => 3000, // 默认 30fps
+            }
+        };
+        unsafe { LAST_INSTANT = Some(now_i); }
 
         // 将 Annex-B 数据切分为单个 NALU，不含起始码
         let nalus: Vec<&[u8]> = {
@@ -220,10 +395,31 @@ impl H264VideoTrack {
         };
 
         let mut pkts: Vec<RtpPacket> = Vec::new();
+        // 如果是关键帧，先发送一个 STAP-A 包含缓存 SPS/PPS
+        if frame.is_keyframe {
+            let sps_opt = { sps_cache.lock().await.clone() };
+            let pps_opt = { pps_cache.lock().await.clone() };
+            if let (Some(sps), Some(pps)) = (sps_opt, pps_opt) {
+                let mut stap = Vec::with_capacity(1 + 2 + sps.len() + 2 + pps.len());
+                stap.push(0x78); // F=0, NRI=3(11), Type=24 => 0b01111000 = 0x78
+                stap.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+                stap.extend_from_slice(&sps);
+                stap.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+                stap.extend_from_slice(&pps);
+                let stap_bytes = Bytes::from(stap);
+                let pkts = packetizer_guard.packetize(&stap_bytes, 0)?;
+                for mut pkt in pkts {
+                    if let Err(e) = track.write_rtp(&mut pkt).await {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
         for (idx, nalu) in nalus.iter().enumerate() {
             let is_last_nalu = idx == nalus.len() - 1;
             let n_bytes = Bytes::copy_from_slice(nalu);
-            let samples_inc = if idx == 0 { 3000 } else { 0 };
+            let samples_inc = if idx == 0 { samples_inc_frame } else { 0 };
             let mut pks = packetizer_guard.packetize(&n_bytes, samples_inc)?;
             if is_last_nalu {
                 if let Some(last) = pks.last_mut() {
@@ -231,6 +427,19 @@ impl H264VideoTrack {
                 }
             }
             pkts.extend(pks);
+
+            // 缓存最近 SPS / PPS
+            if !nalu.is_empty() {
+                let nal_type = nalu[0] & 0x1F;
+                // 7 SPS， 8 PPS
+                if nal_type == 7 {
+                    let mut sps_lock = sps_cache.lock().await;
+                    *sps_lock = Some(nalu.to_vec());
+                } else if nal_type == 8 {
+                    let mut pps_lock = pps_cache.lock().await;
+                    *pps_lock = Some(nalu.to_vec());
+                }
+            }
         }
 
         let mut total_bytes = 0usize;
@@ -288,7 +497,9 @@ impl H264VideoTrack {
                     codec: cfg.codec.clone(),
                     quality: 60,
                 };
-                self.update_config(new_config).await?;
+                if new_config != cfg {
+                    self.update_config(new_config).await?;
+                }
             }
             NetworkQuality::Good => {
                 let (w, h) = (1920, 1080);  
@@ -301,7 +512,9 @@ impl H264VideoTrack {
                     codec: cfg.codec.clone(),
                     quality: 75,
                 };
-                self.update_config(new_config).await?;
+                if new_config != cfg {
+                    self.update_config(new_config).await?;
+                }
             }
             NetworkQuality::Excellent => {
                 let (w, h) = (1920, 1080);  
@@ -314,7 +527,9 @@ impl H264VideoTrack {
                     codec: cfg.codec.clone(),
                     quality: 90,
                 };
-                self.update_config(new_config).await?;
+                if new_config != cfg {
+                    self.update_config(new_config).await?;
+                }
             }
         }
 
@@ -358,7 +573,7 @@ impl H264VideoTrack {
 
     /// 发送已编码帧到WebRTC轨道（异步）
     pub async fn send_encoded_frame(&self, frame: &crate::video_encoder::EncodedFrame) -> Result<()> {
-        let bytes_sent = Self::send_h264_frame(&self.track, &self.packetizer, frame).await?;
+        let bytes_sent = Self::send_h264_frame(&self.track, &self.packetizer, &self.last_sps, &self.last_pps, frame).await?;
 
         let mut stats = self.stats.lock().await;
         stats.frames_sent += 1;

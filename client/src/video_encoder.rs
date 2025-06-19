@@ -1,6 +1,6 @@
 use anyhow::Result;
 use log::{debug, warn};
-use openh264::encoder::{Encoder, EncoderConfig};
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, RateControlMode, UsageType};
 use openh264::OpenH264API;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -57,7 +57,14 @@ impl H264VideoEncoder {
         let api = OpenH264API::from_source();
         
         // 使用openh264 0.8.1的正确API - 直接创建编码器，然后配置
-        let encoder = Encoder::with_api_config(api, EncoderConfig::new())?;
+        let cfg = EncoderConfig::new()
+            .max_frame_rate(FrameRate::from_hz(_config.fps))
+            .bitrate(BitRate::from_bps(_config.bitrate))
+            .skip_frames(false)
+            .rate_control_mode(RateControlMode::Off)
+            .usage_type(UsageType::ScreenContentRealTime);
+
+        let encoder = Encoder::with_api_config(api, cfg)?;
         Ok(encoder)
     }
 
@@ -85,21 +92,25 @@ impl H264VideoEncoder {
         let width = self.config.width;
         let height = self.config.height;
         
-        if self.next_force_keyframe {
-            self.next_force_keyframe = false;
-            self.last_keyframe = self.frame_count;
-            debug!("🔑 强制生成关键帧 - 帧#{}", self.frame_count);
-        }
-
         let yuv_buffer = self.convert_rgba_to_yuv(rgba_data, width as usize, height as usize)?;
 
         let mut encoder = self.encoder.lock().await;
+
+        // 若等待关键帧，则在真正编码前请求 IDR
+        if self.next_force_keyframe {
+            let _ = encoder.force_intra_frame();
+            debug!("📣 已向 OpenH264 请求 IDR 帧 (#{}).", self.frame_count);
+            // 重置标志，避免连续多帧都被标记
+            self.next_force_keyframe = false;
+        }
+
         let encoded_slice = encoder.encode(&yuv_buffer)?;
         let frame_data = encoded_slice.to_vec();
         let is_keyframe = self.is_keyframe(&frame_data);
         
         if is_keyframe {
             log::info!("✅ 成功编码I帧 (关键帧): {}字节", frame_data.len());
+            self.last_keyframe = self.frame_count;
         }
 
         if frame_data.is_empty() {
@@ -107,6 +118,10 @@ impl H264VideoEncoder {
         }
 
         self.validate_annex_b(&frame_data);
+
+        if self.frame_count - self.last_keyframe > 30 {
+            self.next_force_keyframe = true;
+        }
 
         Ok(EncodedFrame {
             data: frame_data,
@@ -269,8 +284,8 @@ impl VideoEncoderFactory {
         let config = VideoEncoderConfig {
             width,
             height,
-            fps: 15.0,
-            bitrate: 500_000, // 500kbps
+            fps: 30.0,        // 提升到 30fps 减少首帧等待
+            bitrate: 800_000, // 略提高起始码率
             codec: VideoCodec::VP8,
             quality: 60,
         };

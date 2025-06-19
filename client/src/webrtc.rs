@@ -207,14 +207,21 @@ impl WebRTCClient {
                                 log::info!("🚀 视频轨道已激活");
                             }
                             
-                            // 连接稳定后立即切换到高画质并发送关键帧
+                            // 连接稳定后先跑低延迟配置 3 秒，待链路平稳再切高画质
+                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
                             if let Err(e) = manager.update_config(StreamConfig::high_quality()).await {
-                                log::warn!("⚠️ 切换高画质失败: {}", e);
+                                log::warn!("⚠️ 延迟切高画质失败: {}", e);
                             } else {
-                                log::info!("🌟 已切换至高画质 (1920x1080 30fps) ");
-                                // 再次强制关键帧，加速画质切换
-                                if let Err(e) = manager.force_keyframe().await {
-                                    log::warn!("⚠️ 切换画质后强制关键帧失败: {}", e);
+                                log::info!("🌟 延迟3s后切到高画质 (1920x1080 30fps)");
+
+                                // 在 1 秒时间窗内多次请求关键帧，加速浏览器解码
+                                use std::time::Duration;
+                                for _ in 0..5 {
+                                    if let Err(e) = manager.force_keyframe().await {
+                                        log::warn!("⚠️ 关键帧请求失败: {}", e);
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
                                 }
                             }
                             

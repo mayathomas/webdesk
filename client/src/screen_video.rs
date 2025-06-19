@@ -152,6 +152,30 @@ impl VideoScreenCapture {
     pub async fn get_stats(&self) -> CaptureStats {
         self.stats.lock().await.clone()
     }
+
+    /// 同步捕获一帧（立即获取首帧）
+    pub async fn capture_single_frame(&self) -> Result<VideoFrame> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut cap = self.capturer.lock().await;
+            let raw = cap.capture_frame().await?;
+            return Ok(VideoFrame { data: raw.data });
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut cap = self.capturer.lock().await;
+            let raw = cap.capture_frame().await?;
+            return Ok(VideoFrame { data: raw.data });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut cap = self.capturer.lock().await;
+            let raw = cap.capture_frame().await?;
+            return Ok(VideoFrame { data: raw.data });
+        }
+        #[allow(unreachable_code)]
+        Err(anyhow!("Unsupported platform"))
+    }
 }
 
 impl Default for CaptureConfig {
