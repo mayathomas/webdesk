@@ -1,0 +1,15 @@
+[package]
+name = "stun-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = "4.5.40"
+# 使用更成熟的STUN库
+stun-rs = "0.1.11"
+# 异步运行时
+tokio = { version = "1.0", features = ["full"] }
+# 错误处理
+anyhow = "1.0"
+# 日志
+env_logger = "0.10"

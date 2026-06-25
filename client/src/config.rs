@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
@@ -127,24 +126,20 @@ impl WebRtcConfig {
     pub fn to_ice_servers(&self) -> Vec<RTCIceServer> {
         let mut ice_servers = Vec::new();
         
-        // 添加STUN服务器
+        // 添加 STUN 服务器
         for stun in &self.stun_servers {
-            ice_servers.push(RTCIceServer {
-                urls: vec![stun.url.clone()],
-                username: "".to_owned(),
-                credential: "".to_owned(),
-                credential_type: RTCIceCredentialType::Unspecified,
-            });
+            let mut server = RTCIceServer::default();
+            server.urls = vec![stun.url.clone()];
+            ice_servers.push(server);
         }
         
-        // 添加TURN服务器
+        // 添加 TURN 服务器
         for turn in &self.turn_servers {
-            ice_servers.push(RTCIceServer {
-                urls: vec![turn.url.clone()],
-                username: turn.username.clone(),
-                credential: turn.credential.clone(),
-                credential_type: RTCIceCredentialType::Password,
-            });
+            let mut server = RTCIceServer::default();
+            server.urls = vec![turn.url.clone()];
+            server.username = turn.username.clone();
+            server.credential = turn.credential.clone();
+            ice_servers.push(server);
         }
         
         ice_servers

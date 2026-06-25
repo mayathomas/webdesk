@@ -1,12 +1,16 @@
 mod config;
 mod input;
 mod screen;
+mod screen_video;
 mod types;
 mod state;
 mod commands;
 mod network;
 mod threads;
 mod webrtc;
+mod video_encoder;
+mod video_track;
+mod video_stream_manager;
 
 use anyhow::Result;
 use config::ClientConfig;

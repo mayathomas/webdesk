@@ -1,7 +1,16 @@
+# 信令连接配置
+server_config:
+  server_url: "ws://115.159.125.146:3476/ws"
+  # server_url: "ws://127.0.0.1:3476/ws"
+  client_id: "890e78618669b636"
+  auth_code: "11111" 
+
 # WebRTC ICE服务器配置
 stun_servers:
-  - url: "stun:stun.l.google.com:19302"
-  - url: "stun:stun.cloudflare.com:3478"
+  - url: "stun:115.159.125.146:3477"
+  # - url: "stun:127.0.0.1:3477"
+  # - url: "stun:stun.l.google.com:19302"
+  # - url: "stun:stun.cloudflare.com:3478"
 
 turn_servers:
   # 我们自己的TURN服务器
@@ -15,10 +24,3 @@ rtc_config:
   ice_candidate_pool_size: 10
   bundle_policy: "max-bundle"
   rtcp_mux_policy: "require"
-
-# 服务器连接配置
-server_config:
-  server_url: "ws://115.159.125.146:3000/ws"
-  # server_url: "ws://127.0.0.1:3000/ws"
-  client_id: "890e78618669b636"
-  auth_code: "11111" 

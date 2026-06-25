@@ -100,32 +100,19 @@ impl KeyboardController for PlatformInputController {
 #[cfg(windows)]
 impl MouseController for PlatformInputController {
     fn move_mouse(&self, x: i32, y: i32) -> anyhow::Result<()> {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE
-        };
-        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-        
-        let screen_width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let screen_height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        
-        // 转换为绝对坐标 (0-65535)
-        let abs_x = ((x * 65535) / screen_width) as i32;
-        let abs_y = ((y * 65535) / screen_height) as i32;
-        
-        let mut input = INPUT::default();
-        input.r#type = INPUT_MOUSE;
-        input.Anonymous.mi = MOUSEINPUT {
-            dx: abs_x,
-            dy: abs_y,
-            mouseData: 0,
-            dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-            time: 0,
-            dwExtraInfo: 0,
-        };
-        
-        let result = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-        if result == 0 {
-            return Err(anyhow::anyhow!("Failed to move mouse"));
+        use windows::Win32::UI::WindowsAndMessaging::{SetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+
+        // 获取屏幕分辨率并对坐标进行边界检查
+        let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as i32;
+        let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as i32;
+
+        let px_x = x.clamp(0, screen_w.saturating_sub(1));
+        let px_y = y.clamp(0, screen_h.saturating_sub(1));
+
+        // 使用 SetCursorPos 直接按像素移动
+        let ok = unsafe { SetCursorPos(px_x, px_y) };
+        if let Err(e) = ok {
+            return Err(anyhow::anyhow!("Failed to move mouse: {}", e));
         }
         
         Ok(())
@@ -594,13 +581,14 @@ impl InputController {
         }
     }
 
-    /// 模拟鼠标移动
+    /// 模拟鼠标移动 (x, y 为相对坐标 0.0-1.0)
     pub fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
-        self.controller.move_mouse(x as i32, y as i32)?;
+        let (abs_x, abs_y) = self.convert_relative_coords(x, y);
+        self.controller.move_mouse(abs_x, abs_y)?;
         Ok(())
     }
 
-    /// 模拟鼠标按下（不释放）
+    /// 模拟鼠标按下（不释放）(x, y 为相对坐标 0.0-1.0)
     pub fn press_mouse_button(&self, x: f64, y: f64, button: &str) -> Result<()> {
         let button_code = match button {
             "left" => 1,
@@ -609,11 +597,13 @@ impl InputController {
             _ => 1,
         };
 
-        self.controller.send_mouse_down(button_code, x as i32, y as i32)?;
+        // 先转换坐标再发送
+        let (abs_x, abs_y) = self.convert_relative_coords(x, y);
+        self.controller.send_mouse_down(button_code, abs_x, abs_y)?;
         Ok(())
     }
 
-    /// 模拟鼠标释放
+    /// 模拟鼠标释放 (x, y 为相对坐标 0.0-1.0)
     pub fn release_mouse_button(&self, x: f64, y: f64, button: &str) -> Result<()> {
         let button_code = match button {
             "left" => 1,
@@ -622,15 +612,49 @@ impl InputController {
             _ => 1,
         };
 
-        self.controller.send_mouse_up(button_code, x as i32, y as i32)?;
+        // 先转换坐标再发送
+        let (abs_x, abs_y) = self.convert_relative_coords(x, y);
+        self.controller.send_mouse_up(button_code, abs_x, abs_y)?;
         Ok(())
     }
 
-    /// 模拟鼠标滚轮
+    /// 模拟鼠标滚轮 (x, y 为相对坐标 0.0-1.0)
     pub fn scroll_mouse(&self, x: f64, y: f64, delta: i32) -> Result<()> {
-        self.controller.move_mouse(x as i32, y as i32)?;
+        let (abs_x, abs_y) = self.convert_relative_coords(x, y);
+        self.controller.move_mouse(abs_x, abs_y)?;
         self.controller.send_scroll(0, delta)?;
         Ok(())
+    }
+
+    /// 转换相对坐标为绝对坐标
+    fn convert_relative_coords(&self, x: f64, y: f64) -> (i32, i32) {
+        #[cfg(windows)]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+
+            // 获取主显示器分辨率，计算像素级坐标
+            let screen_width = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f64;
+            let screen_height = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f64;
+
+            ((x * screen_width).round() as i32, (y * screen_height).round() as i32)
+        }
+        
+        #[cfg(target_os = "macos")]
+        {
+            use core_graphics::display::CGMainDisplayID;
+            let display_id = CGMainDisplayID();
+            let screen_width = core_graphics::display::CGDisplayPixelsWide(display_id) as f64;
+            let screen_height = core_graphics::display::CGDisplayPixelsHigh(display_id) as f64;
+            ((x * screen_width) as i32, (y * screen_height) as i32)
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            // 对于Linux，假设1920x1080分辨率，实际应该动态获取
+            let screen_width = 1920.0;
+            let screen_height = 1080.0;
+            ((x * screen_width) as i32, (y * screen_height) as i32)
+        }
     }
 
     /// 模拟按键按下

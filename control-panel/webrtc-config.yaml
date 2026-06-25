@@ -1,0 +1,68 @@
+# 信号服务器配置
+signals_server:
+  url: "ws://115.159.125.146:3476"
+  # url: "ws://localhost:3476"
+  reconnect_attempts: 5
+  reconnect_delay: 1000  # 毫秒
+
+# WebRTC ICE服务器配置
+stun_servers:
+  - url: "stun:115.159.125.146:3477"
+  # - url: "stun:127.0.0.1:3477"
+  # - url: "stun:stun.l.google.com:19302"
+  # - url: "stun:stun.cloudflare.com:3478"
+
+turn_servers:
+  # 我们自己的TURN服务器
+  - url: "turn:115.159.125.146:3478"
+  # - url: "turn:127.0.0.1:3478"
+    username: "maya"
+    credential: "sorrow2713"
+
+# WebRTC连接配置
+rtc_config:
+  ice_candidate_pool_size: 10
+  bundle_policy: "max-bundle"
+  rtcp_mux_policy: "require"
+  ice_transport_policy: "all"  # 或 "relay" 强制使用TURN
+
+# 数据通道配置
+data_channel:
+  ordered: true
+  max_retransmits: 3
+  max_packet_life_time: null
+
+# 视频配置
+video_config:
+  codec: "H264"
+  profiles:
+    - name: "720p30"
+      width: 1280
+      height: 720
+      fps: 30
+      bitrate: 1500000
+    - name: "1080p25"
+      width: 1920
+      height: 1080
+      fps: 25
+      bitrate: 2500000
+    - name: "1080p30"
+      width: 1920
+      height: 1080
+      fps: 30
+      bitrate: 4000000
+
+# HTTPS服务器配置
+https_config:
+  # 是否启用HTTPS
+  enabled: false
+  # HTTP端口
+  http_port: 3000
+  # HTTPS端口
+  https_port: 3443
+  # SSL证书文件路径
+  cert_path: "cert.pem"
+  # SSL私钥文件路径  
+  key_path: "key.pem"
+  # 是否自动生成自签名证书（开发模式）
+  auto_generate_cert: true 
